@@ -141,11 +141,9 @@ class Trapezoid:
         self.bottom = bottom
         self.leftx = leftx
         self.rightx = rightx
-        # Neighbor pointers
-        self.upper_left: Optional[Trapezoid] = None
-        self.upper_right: Optional[Trapezoid] = None
-        self.lower_left: Optional[Trapezoid] = None
-        self.lower_right: Optional[Trapezoid] = None
+        # Neighbor pointers - now lists to support multiple neighbors
+        self.left_neighbors: List[Trapezoid] = []
+        self.right_neighbors: List[Trapezoid] = []
         # Back-pointer to DAG leaf
         self.leaf: Optional[Leaf] = None
     
