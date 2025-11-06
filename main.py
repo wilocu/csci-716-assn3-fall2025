@@ -82,9 +82,9 @@ def main():
         print(f"Error reading input file:", e, file=sys.stderr)
         sys.exit(1)
     
-    # visualization of segments in bounding box using matplotlib
-    # if visualize:
-    #     utils.visualize_input_segments(segments, bbox)
+    # visualization of raw segments in bounding box using matplotlib
+    if visualize:
+        utils.visualize_input_segments(segments_data, bbox)
 
 
     # (2) Build trapezoidal map (uses randomized-incremental algorithm)

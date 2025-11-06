@@ -227,8 +227,7 @@ def visualize_input_segments(segments, bbox):
     ax.add_patch(bbox_rect)
     # Draw segments
     for seg in segments:
-        ax.plot([seg.left.x, seg.right.x], [seg.left.y, seg.right.y], marker='o')
-        ax.text(seg.left.x, seg.left.y, seg.left.label, fontsize=8, verticalalignment='bottom', horizontalalignment='right')
-        ax.text(seg.right.x, seg.right.y, seg.right.label, fontsize=8, verticalalignment='bottom', horizontalalignment='left')
+        lx, ly, rx, ry = seg
+        ax.plot([lx, rx], [ly, ry], marker='o')
     plt.grid(True)
     plt.show()
