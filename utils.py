@@ -8,8 +8,8 @@
 #
 
 import os, sys
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, List, Tuple, Dict
+import matplotlib.pyplot as plt
 
 #
 # Read/write points from/to file utilities
@@ -83,3 +83,152 @@ def write_file(intersections, path: str) -> None:
     Write intersections to a `.txt` file
     """
     raise NotImplementedError("write_file function is not yet implemented.")
+
+
+#################
+#   Utilities   #
+#################
+
+EPS = 1e-12     # used for handling rounding errors
+
+# === Geometries ===
+
+class Point:
+    def __init__(self, x, y, label=""):
+        self.x = x
+        self.y = y
+        self.label = label
+
+    def __repr__(self):
+        return f"{self.label}({self.x}, {self.y})"
+    
+    def __eq__(self, other):
+        return abs(self.x - other.x) < 1e-9 and abs(self.y - other.y) < 1e-9
+    
+
+class Segment:
+    def __init__(self, p1, p2, label=""):
+        # Ensure left point has smaller x (or smaller y if vertical)
+        if p1.x < p2.x or (p1.x == p2.x and p1.y < p2.y):
+            self.left = p1
+            self.right = p2
+        else:
+            self.left = p2
+            self.right = p1
+        self.label = label
+    
+    @property
+    def xmin(self):
+        return self.left.x
+    
+    @property
+    def xmax(self):
+        return self.right.x
+    
+    def y_at(self, x: float) -> float:
+        diff = self.xmax - self.xmin
+        t = 0.0 if abs(diff) < EPS else (x - self.xmin) / (diff)
+        return self.left.y + t * (self.right.y - self.left.y)
+
+    def __repr__(self):
+        return f"{self.label}[{self.left} -> {self.right}]"
+
+
+class Trapezoid:
+    def __init__(self, top: Optional[Segment], bottom: Optional[Segment], leftx: float, rightx: float):
+        # Trapezoid bounds
+        self.top = top
+        self.bottom = bottom
+        self.leftx = leftx
+        self.rightx = rightx
+        # Neighbor pointers
+        self.upper_left: Optional[Trapezoid] = None
+        self.upper_right: Optional[Trapezoid] = None
+        self.lower_left: Optional[Trapezoid] = None
+        self.lower_right: Optional[Trapezoid] = None
+        # Back-pointer to DAG leaf
+        self.leaf: Optional[Leaf] = None
+    
+    def contains_x(self, x: float) -> bool:
+        return self.leftx - EPS <= x <= self.rightx + EPS
+    
+    def y_top(self, x: float, y_top_boundary: float) -> float:
+        return self.top.y_at(x) if self.top is not None else y_top_boundary
+    
+    def y_bottom(self, x: float, y_bottom_boundary: float) -> float:
+        return self.bottom.y_at(x) if self.bottom is not None else y_bottom_boundary
+
+
+# === DAG Structures ===
+
+class Node:
+    # Exists purely as a parent class to XNode and YNode
+    pass
+
+
+class XNode(Node):
+    def __init__(self, x: float, left: Node, right: Node):
+        self.x = x
+        self.left = left
+        self.right = right
+
+
+class YNode(Node):
+    def __init__(self, seg: Segment, above: Node, below: Node):
+        self.seg = seg
+        self.above = above
+        self.below = below
+
+
+class Leaf(Node):
+    def __init__(self, trap: Trapezoid):
+        self.trap = trap
+        trap.leaf = self    # set trapezoid back-pointer
+
+
+
+def construct_segments(segments_data):
+    # deduplicate points so identical (x, y) reuse the same point object
+    point_map: Dict[Tuple[float, float], Point] = {}
+
+    def get_point(x: float, y: float, label: str) -> Point:
+        key = (x, y)
+        p = point_map.get(key)
+        if p is None:
+            p = Point(x, y, label)
+            point_map[key] = p
+        return p
+    
+    labeled_segments: List[Segment] = []
+    for i, (x1, y1, x2, y2) in enumerate(segments_data, start=1):
+        # Assign P{i} to the left endpoint and Q{i} to the right endpoint by x
+        if (x1 < x2) or (abs(x1 - x2) < EPS and y1 <= y2):
+            p_left = get_point(x1, y1, f"P{i}")
+            p_right = get_point(x2, y2, f"Q{i}")
+        else:
+            p_left = get_point(x2, y2, f"P{i}")
+            p_right = get_point(x1, y1, f"Q{i}")
+        s = Segment(p_left, p_right, label=f"S{i}")
+        labeled_segments.append(s)
+    
+    return labeled_segments
+
+
+def visualize_input_segments(segments, bbox):
+    min_x, min_y, max_x, max_y = bbox
+    _, ax = plt.subplots()
+    ax.set_title("Input Line Segments")
+    ax.set_xlim(min_x - 1, max_x + 1)
+    ax.set_ylim(min_y - 1, max_y + 1)
+    ax.set_aspect('equal', adjustable='box')
+    # Draw bounding box
+    bbox_rect = plt.Rectangle((min_x, min_y), max_x - min_x, max_y - min_y, 
+                              linewidth=1, edgecolor='black', facecolor='none')
+    ax.add_patch(bbox_rect)
+    # Draw segments
+    for seg in segments:
+        ax.plot([seg.left.x, seg.right.x], [seg.left.y, seg.right.y], marker='o')
+        ax.text(seg.left.x, seg.left.y, seg.left.label, fontsize=8, verticalalignment='bottom', horizontalalignment='right')
+        ax.text(seg.right.x, seg.right.y, seg.right.label, fontsize=8, verticalalignment='bottom', horizontalalignment='left')
+    plt.grid(True)
+    plt.show()
