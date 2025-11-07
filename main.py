@@ -53,13 +53,38 @@ class TrapezoidalMap:
             trap_map._insert_segment(seg)
         return trap_map
     
-    def locate_point(self, p: Point) -> utils.Trapezoid:
+    def _find_next_trapezoid(self, current: Trapezoid, seg: Segment) -> Optional[Trapezoid]:
+        """
+        Find the next trapezoid that the segment enters when exiting current trapezoid.
+        Returns None if no valid neighbor is found.
+        """
+        xr = current.rightx
+        y_seg = seg.y_at(xr)
+
+        # Check right neighbors to find which one the segment enters
+        for neighbor in current.right_neighbors:
+            # Check if segment at x=xr falls within neighbor's vertical span
+            y_top = neighbor.y_top(xr, self.bbox_y_max)
+            y_bot = neighbor.y_bottom(xr, self.bbox_y_min)
+
+            if y_bot - utils.EPS <= y_seg <= y_top + utils.EPS:
+                return neighbor
+
+        return None
+
+    def locate_point(self, p: Point, track_path: bool = False) -> utils.Trapezoid:
         node = self.root
+        path = [] if track_path else None
+
         while not isinstance(node, Leaf):
             if isinstance(node, XNode):
+                if track_path:
+                    path.append(('X', node.x))
                 # get left/right node
                 node = node.left if p.x < node.x else node.right
             elif isinstance(node, YNode):
+                if track_path:
+                    path.append(('Y', node.seg))
                 # get above/below segment node
                 xq = p.x
                 if xq < node.seg.xmin:
@@ -68,58 +93,28 @@ class TrapezoidalMap:
                     xq = node.seg.xmax
                 y_on_seg = node.seg.y_at(xq)
                 node = node.above if p.y > y_on_seg else node.below
+
+        if track_path:
+            path.append(('T', node.trap))
+            return node.trap, path
         return node.trap
         
     def _insert_segment(self, seg: Segment):
         # (1) Locate trapezoid containing left endpoint
         t = self.locate_point(seg.left)
-        # If locate_point returns an obsolete trapezoid, find a valid one at the same point
-        while t not in self.trapezoids:
-            # This shouldn't happen often, but if it does, search for a valid trapezoid
-            # by checking the trapezoids set
-            for candidate in self.trapezoids:
-                if (candidate.leftx - utils.EPS <= seg.left.x <= candidate.rightx + utils.EPS):
-                    y_top = candidate.y_top(seg.left.x, self.bbox_y_max)
-                    y_bot = candidate.y_bottom(seg.left.x, self.bbox_y_min)
-                    if y_bot - utils.EPS <= seg.left.y <= y_top + utils.EPS:
-                        t = candidate
-                        break
-            if t not in self.trapezoids:
-                raise RuntimeError(f"Could not find valid trapezoid for start point {seg.left}")
 
         crossed_traps: List[Trapezoid] = []
-        # (2) walk through trapezoids intersected by s from left to right
+        # (2) Walk through trapezoids intersected by segment from left to right
         while True:
             crossed_traps.append(t)
+            # Stop if segment's right endpoint is within current trapezoid
             if seg.right.x <= t.rightx + utils.EPS:
                 break
-            # Find the next trapezoid by checking right neighbors
-            # The segment intersects the right boundary at x = t.rightx
-            xr = t.rightx
-            y_seg = seg.y_at(xr)
 
-            # Find which right neighbor the segment enters
-            # Skip obsolete neighbors not in the trapezoids set
-            next_trap = None
-            for neighbor in t.right_neighbors:
-                # Skip obsolete trapezoids
-                if neighbor not in self.trapezoids:
-                    continue
-
-                # Check if the segment at x=xr falls within this neighbor's vertical span
-                y_top = neighbor.y_top(xr, self.bbox_y_max)
-                y_bot = neighbor.y_bottom(xr, self.bbox_y_min)
-
-                # The segment enters this neighbor if y_seg is between its top and bottom
-                if y_bot - utils.EPS <= y_seg <= y_top + utils.EPS:
-                    next_trap = neighbor
-                    break
-
-            if next_trap is None:
-                # Fallback: shouldn't happen in valid trapezoidal map
-                raise RuntimeError(f"Could not find next trapezoid at x={xr}, y={y_seg}")
-
-            t = next_trap
+            # Find next trapezoid by checking where segment crosses right boundary
+            t = self._find_next_trapezoid(t, seg)
+            if t is None:
+                raise RuntimeError(f"Could not find next trapezoid for segment {seg.label}")
         # (3) split crossed trapezoids with the segment and build a local sub-DAG
         sub = self._split_crossed(crossed_traps, seg)
         # (4) splice the sub-DAG into the global DAG, replacing the first crossed leaf
@@ -207,97 +202,13 @@ class TrapezoidalMap:
             traps_below.append(t_lower)
             i = j
 
-        # ===================================================================
-        # Optimized neighbor pointer management - O(k × d) instead of O(k²)
-        # ===================================================================
-
-        # Collect ALL neighbors from ALL crossed trapezoids
-        all_left_neighbors = set()
-        all_right_neighbors = set()
-        for trap in crossed_traps:
-            all_left_neighbors.update(trap.left_neighbors)
-            all_right_neighbors.update(trap.right_neighbors)
-
-        # Group new trapezoids by their boundary x-coordinates for O(1) lookup
-        # This optimization reduces complexity from O(neighbors × new_traps) to O(neighbors + new_traps)
-        new_traps_by_leftx = {}  # Maps x-coordinate to list of trapezoids with that left boundary
-        new_traps_by_rightx = {}  # Maps x-coordinate to list of trapezoids with that right boundary
-
-        for trap in [left_remainder] + traps_above + traps_below + ([right_remainder] if right_remainder else []):
-            if trap is None:
-                continue
-            # Index by left boundary
-            if trap.leftx not in new_traps_by_leftx:
-                new_traps_by_leftx[trap.leftx] = []
-            new_traps_by_leftx[trap.leftx].append(trap)
-            # Index by right boundary
-            if trap.rightx not in new_traps_by_rightx:
-                new_traps_by_rightx[trap.rightx] = []
-            new_traps_by_rightx[trap.rightx].append(trap)
-
-        # Update left neighbors: replace crossed trapezoids with appropriate new ones
-        for neighbor in all_left_neighbors:
-            if neighbor not in self.trapezoids:
-                continue
-
-            # Remove all crossed trapezoids from right neighbors
-            neighbor.right_neighbors = [t for t in neighbor.right_neighbors if t not in crossed_traps]
-
-            # Add new trapezoids that are geometrically adjacent
-            # Only check trapezoids whose left boundary matches this neighbor's right boundary
-            neighbor_rightx = neighbor.rightx
-            candidates = new_traps_by_leftx.get(neighbor_rightx, [])
-            for new_trap in candidates:
-                if self._trapezoids_are_vertically_adjacent(neighbor, new_trap, neighbor_rightx):
-                    neighbor.right_neighbors.append(new_trap)
-                    new_trap.left_neighbors.append(neighbor)
-
-        # Update right neighbors: replace crossed trapezoids with appropriate new ones
-        for neighbor in all_right_neighbors:
-            if neighbor not in self.trapezoids:
-                continue
-
-            # Remove all crossed trapezoids from left neighbors
-            neighbor.left_neighbors = [t for t in neighbor.left_neighbors if t not in crossed_traps]
-
-            # Add new trapezoids that are geometrically adjacent
-            # Only check trapezoids whose right boundary matches this neighbor's left boundary
-            neighbor_leftx = neighbor.leftx
-            candidates = new_traps_by_rightx.get(neighbor_leftx, [])
-            for new_trap in candidates:
-                if self._trapezoids_are_vertically_adjacent(new_trap, neighbor, neighbor_leftx):
-                    neighbor.left_neighbors.append(new_trap)
-                    new_trap.right_neighbors.append(neighbor)
-
-        # Stitch horizontal neighbors within the new trapezoids
-        for i in range(len(traps_above) - 1):
-            if traps_above[i+1] not in traps_above[i].right_neighbors:
-                traps_above[i].right_neighbors.append(traps_above[i+1])
-                traps_above[i+1].left_neighbors.append(traps_above[i])
-
-        for i in range(len(traps_below) - 1):
-            if traps_below[i+1] not in traps_below[i].right_neighbors:
-                traps_below[i].right_neighbors.append(traps_below[i+1])
-                traps_below[i+1].left_neighbors.append(traps_below[i])
-
-        # Connect remainders to above/below trapezoids
-        if left_remainder and traps_above:
-            if traps_above[0] not in left_remainder.right_neighbors:
-                left_remainder.right_neighbors.append(traps_above[0])
-                traps_above[0].left_neighbors.append(left_remainder)
-        if left_remainder and traps_below:
-            if traps_below[0] not in left_remainder.right_neighbors:
-                left_remainder.right_neighbors.append(traps_below[0])
-                traps_below[0].left_neighbors.append(left_remainder)
-
-        if right_remainder and traps_above:
-            if traps_above[-1] not in right_remainder.left_neighbors:
-                right_remainder.left_neighbors.append(traps_above[-1])
-                traps_above[-1].right_neighbors.append(right_remainder)
-        if right_remainder and traps_below:
-            if traps_below[-1] not in right_remainder.left_neighbors:
-                right_remainder.left_neighbors.append(traps_below[-1])
-                traps_below[-1].right_neighbors.append(right_remainder)
+        # Update neighbor pointers using helper methods
+        new_traps = [left_remainder] + traps_above + traps_below + ([right_remainder] if right_remainder else [])
+        self._connect_neighbors(crossed_traps, new_traps)
+        self._connect_horizontal_neighbors(traps_above)
+        self._connect_horizontal_neighbors(traps_below)
+        self._connect_remainder_to_splits(left_remainder, traps_above, traps_below, is_left=True)
+        self._connect_remainder_to_splits(right_remainder, traps_above, traps_below, is_left=False)
 
         # Build the local sub-DAG
         def chain_by_bounds(traps: List[Trapezoid]) -> Node:
@@ -340,6 +251,87 @@ class TrapezoidalMap:
         overlap_top = min(left_y_top, right_y_top)
 
         return overlap_bot <= overlap_top + utils.EPS
+
+    def _connect_neighbors(self, old_traps: List[Trapezoid], new_traps: List[Trapezoid]):
+        """
+        Update neighbor pointers when replacing old trapezoids with new ones.
+        Efficiently handles O(k × d) neighbor updates instead of O(k²).
+        """
+        # Collect all neighbors from crossed trapezoids
+        all_left_neighbors = set()
+        all_right_neighbors = set()
+        for trap in old_traps:
+            all_left_neighbors.update(trap.left_neighbors)
+            all_right_neighbors.update(trap.right_neighbors)
+
+        # Index new trapezoids by boundary coordinates for O(1) lookup
+        new_by_leftx = {}
+        new_by_rightx = {}
+        for trap in new_traps:
+            if trap is None:
+                continue
+            new_by_leftx.setdefault(trap.leftx, []).append(trap)
+            new_by_rightx.setdefault(trap.rightx, []).append(trap)
+
+        # Update left neighbors of old trapezoids
+        for neighbor in all_left_neighbors:
+            if neighbor not in self.trapezoids:
+                continue
+            neighbor.right_neighbors = [t for t in neighbor.right_neighbors if t not in old_traps]
+
+            # Add geometrically adjacent new trapezoids
+            for new_trap in new_by_leftx.get(neighbor.rightx, []):
+                if self._trapezoids_are_vertically_adjacent(neighbor, new_trap, neighbor.rightx):
+                    neighbor.right_neighbors.append(new_trap)
+                    new_trap.left_neighbors.append(neighbor)
+
+        # Update right neighbors of old trapezoids
+        for neighbor in all_right_neighbors:
+            if neighbor not in self.trapezoids:
+                continue
+            neighbor.left_neighbors = [t for t in neighbor.left_neighbors if t not in old_traps]
+
+            # Add geometrically adjacent new trapezoids
+            for new_trap in new_by_rightx.get(neighbor.leftx, []):
+                if self._trapezoids_are_vertically_adjacent(new_trap, neighbor, neighbor.leftx):
+                    neighbor.left_neighbors.append(new_trap)
+                    new_trap.right_neighbors.append(neighbor)
+
+    def _connect_horizontal_neighbors(self, traps: List[Trapezoid]):
+        """Link consecutive trapezoids horizontally."""
+        for i in range(len(traps) - 1):
+            if traps[i+1] not in traps[i].right_neighbors:
+                traps[i].right_neighbors.append(traps[i+1])
+                traps[i+1].left_neighbors.append(traps[i])
+
+    def _connect_remainder_to_splits(self, remainder: Optional[Trapezoid],
+                                     above_traps: List[Trapezoid],
+                                     below_traps: List[Trapezoid],
+                                     is_left: bool):
+        """Connect left or right remainder to above/below trapezoids."""
+        if remainder is None or not above_traps or not below_traps:
+            return
+
+        # Left remainder connects to first above/below, right remainder to last
+        target_above = above_traps[0] if is_left else above_traps[-1]
+        target_below = below_traps[0] if is_left else below_traps[-1]
+
+        if is_left:
+            # Left remainder's right neighbors
+            if target_above not in remainder.right_neighbors:
+                remainder.right_neighbors.append(target_above)
+                target_above.left_neighbors.append(remainder)
+            if target_below not in remainder.right_neighbors:
+                remainder.right_neighbors.append(target_below)
+                target_below.left_neighbors.append(remainder)
+        else:
+            # Right remainder's left neighbors
+            if target_above not in remainder.left_neighbors:
+                remainder.left_neighbors.append(target_above)
+                target_above.right_neighbors.append(remainder)
+            if target_below not in remainder.left_neighbors:
+                remainder.left_neighbors.append(target_below)
+                target_below.right_neighbors.append(remainder)
     
     def _dummy_empty_trap(self) -> Trapezoid:
         t = Trapezoid(None, None, self.bbox_x_min, self.bbox_x_min)
@@ -394,6 +386,192 @@ class TrapezoidalMap:
             return node
 
         self.root = replace_in(self.root)
+
+    def query_point(self, x: float, y: float) -> Tuple[str, List[Node]]:
+        """
+        Locate a point and return the traversal path through the DAG as a string.
+        Returns path in format: P1 Q1 S1 P3 S3 P4 S4 T7
+        """
+        p = Point(x, y)
+
+        # Traverse and track actual node objects
+        node = self.root
+        path_nodes = []
+
+        while not isinstance(node, Leaf):
+            path_nodes.append(node)
+            if isinstance(node, XNode):
+                node = node.left if p.x < node.x else node.right
+            elif isinstance(node, YNode):
+                xq = p.x
+                if xq < node.seg.xmin:
+                    xq = node.seg.xmin
+                elif xq > node.seg.xmax:
+                    xq = node.seg.xmax
+                y_on_seg = node.seg.y_at(xq)
+                node = node.above if p.y > y_on_seg else node.below
+
+        # Add final leaf node
+        path_nodes.append(node)
+
+        # Generate node-to-label mapping
+        all_nodes = []
+        node_to_index = {}
+
+        def collect_nodes(n: Node):
+            if n in node_to_index:
+                return
+            node_to_index[n] = len(all_nodes)
+            all_nodes.append(n)
+            if isinstance(n, XNode):
+                collect_nodes(n.left)
+                collect_nodes(n.right)
+            elif isinstance(n, YNode):
+                collect_nodes(n.above)
+                collect_nodes(n.below)
+
+        collect_nodes(self.root)
+
+        # Separate and label nodes properly
+        x_nodes = [n for n in all_nodes if isinstance(n, XNode)]
+        y_nodes = [n for n in all_nodes if isinstance(n, YNode)]
+        leaf_nodes = [n for n in all_nodes if isinstance(n, Leaf)]
+
+        # Build node-to-label mapping
+        node_to_label = {}
+
+        # Sort and label X-nodes as P/Q
+        x_nodes_sorted = sorted(x_nodes, key=lambda n: n.x)
+        p_counter = 1
+        q_counter = 1
+        for xnode in x_nodes_sorted:
+            # Check if it's a left endpoint
+            is_left = any(abs(yseg.seg.left.x - xnode.x) < utils.EPS for yseg in y_nodes)
+            if is_left:
+                node_to_label[xnode] = f"P{p_counter}"
+                p_counter += 1
+            else:
+                node_to_label[xnode] = f"Q{q_counter}"
+                q_counter += 1
+
+        # Label Y-nodes as S1, S2, etc.
+        y_nodes_sorted = sorted(y_nodes, key=lambda n: int(n.seg.label[1:]))
+        for i, ynode in enumerate(y_nodes_sorted, start=1):
+            node_to_label[ynode] = f"S{i}"
+
+        # Label Leaf nodes as T1, T2, etc.
+        for i, leaf in enumerate(leaf_nodes, start=1):
+            node_to_label[leaf] = f"T{i}"
+
+        # Build path string
+        path_labels = [node_to_label.get(n, '?') for n in path_nodes]
+        return ' '.join(path_labels), path_nodes
+
+    def generate_adjacency_matrix(self) -> Tuple[List[str], List[List[int]]]:
+        """
+        Generate the adjacency matrix for the DAG structure.
+        Returns (node_labels, matrix) where matrix[child][parent] = 1.
+        """
+        # Collect all nodes by traversing the DAG
+        all_nodes = []
+        node_to_index = {}
+
+        def collect_nodes(node: Node):
+            if node in node_to_index:
+                return
+            node_to_index[node] = len(all_nodes)
+            all_nodes.append(node)
+
+            if isinstance(node, XNode):
+                collect_nodes(node.left)
+                collect_nodes(node.right)
+            elif isinstance(node, YNode):
+                collect_nodes(node.above)
+                collect_nodes(node.below)
+
+        collect_nodes(self.root)
+
+        # Separate nodes by type and assign labels
+        x_nodes = []  # Point nodes (P and Q)
+        y_nodes = []  # Segment nodes (S)
+        leaf_nodes = []  # Trapezoid nodes (T)
+
+        for node in all_nodes:
+            if isinstance(node, XNode):
+                x_nodes.append(node)
+            elif isinstance(node, YNode):
+                y_nodes.append(node)
+            elif isinstance(node, Leaf):
+                leaf_nodes.append(node)
+
+        # Create mapping from segments to their labels
+        segment_to_label = {}
+        for node in y_nodes:
+            if node.seg not in segment_to_label:
+                segment_to_label[node.seg] = f"S{node.seg.label[1:]}"  # Extract number from label
+
+        # Build ordered node labels: P1...Pk, Q1...Qk, S1...Sn, T1...Tm
+        node_labels = []
+        ordered_nodes = []
+
+        # Process X-nodes (points)
+        point_nodes_with_coords = [(node, node.x) for node in x_nodes]
+        point_nodes_with_coords.sort(key=lambda x: x[1])
+
+        p_counter = 1
+        q_counter = 1
+        for node, x_coord in point_nodes_with_coords:
+            # Determine if this is a P or Q node by checking segments
+            # This is a heuristic - check if it's a left or right endpoint
+            is_left_endpoint = False
+            for seg_node in y_nodes:
+                if abs(seg_node.seg.left.x - x_coord) < utils.EPS:
+                    is_left_endpoint = True
+                    break
+
+            if is_left_endpoint:
+                label = f"P{p_counter}"
+                p_counter += 1
+            else:
+                label = f"Q{q_counter}"
+                q_counter += 1
+
+            node_labels.append(label)
+            ordered_nodes.append(node)
+
+        # Process Y-nodes (segments)
+        segment_nodes_sorted = sorted(y_nodes, key=lambda n: int(n.seg.label[1:]))
+        for node in segment_nodes_sorted:
+            node_labels.append(segment_to_label[node.seg])
+            ordered_nodes.append(node)
+
+        # Process Leaf nodes (trapezoids)
+        for i, node in enumerate(leaf_nodes, start=1):
+            node_labels.append(f"T{i}")
+            ordered_nodes.append(node)
+
+        # Create index mapping for ordered nodes
+        ordered_index = {node: i for i, node in enumerate(ordered_nodes)}
+
+        # Build adjacency matrix: matrix[child][parent] = 1
+        n = len(ordered_nodes)
+        matrix = [[0] * n for _ in range(n)]
+
+        for parent in ordered_nodes:
+            parent_idx = ordered_index[parent]
+            children = []
+
+            if isinstance(parent, XNode):
+                children = [parent.left, parent.right]
+            elif isinstance(parent, YNode):
+                children = [parent.above, parent.below]
+
+            for child in children:
+                if child in ordered_index:
+                    child_idx = ordered_index[child]
+                    matrix[child_idx][parent_idx] = 1
+
+        return node_labels, matrix
 
     def visualize(self, title: str = "Trapezoidal Map"):
         """
@@ -526,6 +704,47 @@ class TrapezoidalMap:
 #   Orchestration   #
 #####################
 
+def write_adjacency_matrix(output_path: str, node_labels: List[str], matrix: List[List[int]]):
+    """
+    Write the adjacency matrix to a file with row and column sums.
+    Format:
+    - First row: column headers (node labels) + "Sum"
+    - Each data row: node label + matrix values + row sum
+    - Last row: "Sum" + column sums + total sum
+    """
+    n = len(node_labels)
+
+    # Calculate row and column sums
+    row_sums = [sum(row) for row in matrix]
+    col_sums = [sum(matrix[i][j] for i in range(n)) for j in range(n)]
+    total_sum = sum(row_sums)
+
+    # Create output directory if it doesn't exist
+    import os
+    output_dir = os.path.dirname(output_path)
+    if output_dir:  # Only create directory if path contains a directory component
+        os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_path, 'w') as f:
+        # Write header row
+        f.write("     ")  # Empty cell for row labels
+        for label in node_labels:
+            f.write(f"{label:>4}")
+        f.write("  Sum\n")
+
+        # Write data rows
+        for i, label in enumerate(node_labels):
+            f.write(f"{label:>4} ")
+            for j in range(n):
+                f.write(f"{matrix[i][j]:>4}")
+            f.write(f"{row_sums[i]:>5}\n")
+
+        # Write sum row
+        f.write("Sum  ")
+        for col_sum in col_sums:
+            f.write(f"{col_sum:>4}")
+        f.write(f"{total_sum:>5}\n")
+
 def parse_input_file():
     parser = argparse.ArgumentParser(description="CSCI-716 Assn3 Trapezoidal Maps & Planar Point Location")
     parser.add_argument("file", type=str, help="Input file containing the planar subdivision data")
@@ -574,9 +793,54 @@ def main():
     trap_map = TrapezoidalMap.from_segments(bbox, segments_data, seed=seed)
     print(f"Constructed trapezoidal map with {len(trap_map.trapezoids)} trapezoids")
 
-    # (3) Visualize the trapezoidal map
+    # (3) Generate and write adjacency matrix
+    node_labels, matrix = trap_map.generate_adjacency_matrix()
+    write_adjacency_matrix(output_path, node_labels, matrix)
+    print(f"Adjacency matrix written to {output_path}")
+    print(f"DAG contains {len(node_labels)} nodes")
+
+    # (4) Visualize the trapezoidal map
     if visualize:
         trap_map.visualize(title=f"Trapezoidal Map ({num_segments} segments)")
+
+    # (5) Interactive point location query mode
+    print("\n" + "="*60)
+    print("Point Location Query Mode")
+    print("Enter a point (x y) to find its location in the trapezoidal map")
+    print("Enter 'quit' or 'exit' to stop")
+    print("="*60)
+
+    while True:
+        try:
+            user_input = input("\nEnter point (x y): ").strip()
+            if user_input.lower() in ['quit', 'exit', 'q']:
+                print("Exiting query mode.")
+                break
+
+            parts = user_input.split()
+            if len(parts) != 2:
+                print("Error: Please enter exactly two numbers separated by a space (x y)")
+                continue
+
+            x, y = float(parts[0]), float(parts[1])
+
+            # Check if point is within bounding box
+            if not (min_x <= x <= max_x and min_y <= y <= max_y):
+                print(f"Warning: Point ({x}, {y}) is outside bounding box!")
+                print(f"Bounding box: ({min_x}, {min_y}) to ({max_x}, {max_y})")
+
+            # Perform query
+            path_string, _ = trap_map.query_point(x, y)
+            print(f"Path: {path_string}")
+
+        except ValueError as e:
+            print(f"Error: Invalid input. Please enter two numbers. ({e})")
+        except EOFError:
+            print("\nExiting query mode.")
+            break
+        except KeyboardInterrupt:
+            print("\nExiting query mode.")
+            break
 
 
 if __name__ == "__main__":

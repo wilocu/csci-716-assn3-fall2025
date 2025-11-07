@@ -1,6 +1,16 @@
 # Extra exclusions
 .idea
 
+# Claude Code / AI Assistant files
+.claude/
+.aider*
+.cursorrules
+claude_*.json
+
+# Test output files
+test_output.txt
+output_*.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
