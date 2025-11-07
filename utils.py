@@ -135,13 +135,17 @@ class Segment:
 
 
 class Trapezoid:
-    def __init__(self, top: Optional[Segment], bottom: Optional[Segment], leftx: float, rightx: float):
+    def __init__(self, top: Optional[Segment], bottom: Optional[Segment], leftx: float, rightx: float,
+                 left_point: Optional['Point'] = None, right_point: Optional['Point'] = None):
         self.label = None
         # Trapezoid bounds
         self.top = top
         self.bottom = bottom
         self.leftx = leftx
         self.rightx = rightx
+        # Point objects for left/right boundaries (optional, for DAG construction)
+        self.left_point = left_point
+        self.right_point = right_point
         # Neighbor pointers - now lists to support multiple neighbors
         self.left_neighbors: List[Trapezoid] = []
         self.right_neighbors: List[Trapezoid] = []
@@ -166,10 +170,15 @@ class Node:
 
 
 class XNode(Node):
-    def __init__(self, x: float, left: Node, right: Node):
-        self.x = x
+    def __init__(self, point: Point, left: Node, right: Node):
+        self.point = point
         self.left = left
         self.right = right
+
+    @property
+    def x(self) -> float:
+        """Convenience property to access x-coordinate."""
+        return self.point.x
 
 
 class YNode(Node):
@@ -185,31 +194,47 @@ class Leaf(Node):
         trap.leaf = self    # set trapezoid back-pointer
 
 
-
 def construct_segments(segments_data):
-    # deduplicate points so identical (x, y) reuse the same point object
+    # Deduplicate points so identical (x, y) reuse the same point object
+    # Use consecutive numbering (P1, P2, P3, ..., Q1, Q2, Q3, ...) without gaps
     point_map: Dict[Tuple[float, float], Point] = {}
+    p_counter = 1
+    q_counter = 1
 
-    def get_point(x: float, y: float, label: str) -> Point:
+    def get_or_create_point(x: float, y: float, is_left: bool) -> Point:
+        """Get existing point or create new one with next consecutive label."""
+        nonlocal p_counter, q_counter
         key = (x, y)
-        p = point_map.get(key)
-        if p is None:
-            p = Point(x, y, label)
-            point_map[key] = p
+
+        # Check if this coordinate already exists
+        if key in point_map:
+            return point_map[key]
+
+        # Create new point with next consecutive label
+        if is_left:
+            label = f"P{p_counter}"
+            p_counter += 1
+        else:
+            label = f"Q{q_counter}"
+            q_counter += 1
+
+        p = Point(x, y, label)
+        point_map[key] = p
         return p
-    
+
     labeled_segments: List[Segment] = []
     for i, (x1, y1, x2, y2) in enumerate(segments_data, start=1):
-        # Assign P{i} to the left endpoint and Q{i} to the right endpoint by x
+        # Order points by x-coordinate to determine left and right endpoints
         if (x1 < x2) or (abs(x1 - x2) < EPS and y1 <= y2):
-            p_left = get_point(x1, y1, f"P{i}")
-            p_right = get_point(x2, y2, f"Q{i}")
+            p_left = get_or_create_point(x1, y1, is_left=True)
+            p_right = get_or_create_point(x2, y2, is_left=False)
         else:
-            p_left = get_point(x2, y2, f"P{i}")
-            p_right = get_point(x1, y1, f"Q{i}")
+            p_left = get_or_create_point(x2, y2, is_left=True)
+            p_right = get_or_create_point(x1, y1, is_left=False)
+
         s = Segment(p_left, p_right, label=f"S{i}")
         labeled_segments.append(s)
-    
+
     return labeled_segments
 
 

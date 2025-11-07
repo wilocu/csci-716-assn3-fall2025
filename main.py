@@ -17,7 +17,8 @@ class TrapezoidalMap:
     def __init__(self, bbox: Tuple[float, float, float, float]):
         x_min, _, x_max, _ = bbox
         self.bbox = bbox
-        t0 = Trapezoid(top=None, bottom=None, leftx=x_min, rightx=x_max)
+        t0 = Trapezoid(top=None, bottom=None, leftx=x_min, rightx=x_max,
+                       left_point=None, right_point=None)
         self.root: Node = Leaf(t0)
         self.trapezoids: set[Trapezoid] = {t0}
     
@@ -77,19 +78,13 @@ class TrapezoidalMap:
 
         return None
 
-    def locate_point(self, p: Point, track_path: bool = False) -> utils.Trapezoid:
+    def locate_point(self, p: Point) -> utils.Trapezoid:
         node = self.root
-        path = [] if track_path else None
-
         while not isinstance(node, Leaf):
             if isinstance(node, XNode):
-                if track_path:
-                    path.append(('X', node.x))
                 # get left/right node
                 node = node.left if p.x < node.x else node.right
             elif isinstance(node, YNode):
-                if track_path:
-                    path.append(('Y', node.seg))
                 # get above/below segment node
                 xq = p.x
                 if xq < node.seg.xmin:
@@ -98,10 +93,6 @@ class TrapezoidalMap:
                     xq = node.seg.xmax
                 y_on_seg = node.seg.y_at(xq)
                 node = node.above if p.y > y_on_seg else node.below
-
-        if track_path:
-            path.append(('T', node.trap))
-            return node.trap, path
         return node.trap
         
     def _insert_segment(self, seg: Segment):
@@ -121,6 +112,7 @@ class TrapezoidalMap:
             t = self._find_next_trapezoid(t, seg)
             if t is None:
                 raise RuntimeError(f"Could not find next trapezoid for segment {seg.label}")
+        print(crossed_traps)
         # (3) split crossed trapezoids with the segment and build a local sub-DAG
         sub = self._split_crossed(crossed_traps, seg)
         self._splice(crossed_traps, sub)
@@ -141,18 +133,21 @@ class TrapezoidalMap:
         seg_right_x = min(seg.xmax, t_last.rightx)
 
         if seg_left_x - t_first.leftx > utils.EPS:
-            left_remainder = Trapezoid(t_first.top, t_first.bottom, t_first.leftx, seg_left_x)
+            left_remainder = Trapezoid(t_first.top, t_first.bottom, t_first.leftx, seg_left_x,
+                                      t_first.left_point, seg.left)
             left_remainder.left_neighbors = t_first.left_neighbors.copy()
             self.trapezoids.add(left_remainder)
 
         if t_last.rightx - seg_right_x > utils.EPS:
-            right_remainder = Trapezoid(t_last.top, t_last.bottom, seg_right_x, t_last.rightx)
+            right_remainder = Trapezoid(t_last.top, t_last.bottom, seg_right_x, t_last.rightx,
+                                       seg.right, t_last.right_point)
             right_remainder.right_neighbors = t_last.right_neighbors.copy()
             self.trapezoids.add(right_remainder)
 
         # Merge consecutive crossed trapezoids with same top/bottom into single trapezoids
         i = 0
         while i < len(crossed_traps):
+            # First iterate through top split trapezoids
             same_top = crossed_traps[i].top
             j = i
             while j < len(crossed_traps) and crossed_traps[j].top == same_top:
@@ -161,13 +156,18 @@ class TrapezoidalMap:
             left_x = seg_left_x if i == 0 else crossed_traps[i-1].rightx
             right_x = seg_right_x if j == len(crossed_traps) else crossed_traps[j-1].rightx
 
-            t_upper = Trapezoid(same_top, seg, left_x, right_x)
+            # Determine Point objects for boundaries
+            left_pt = seg.left if i == 0 else crossed_traps[i-1].right_point
+            right_pt = seg.right if j == len(crossed_traps) else crossed_traps[j-1].right_point
+
+            t_upper = Trapezoid(same_top, seg, left_x, right_x, left_pt, right_pt)
             self.trapezoids.add(t_upper)
             traps_above.append(t_upper)
             i = j
 
         i = 0
         while i < len(crossed_traps):
+            # Then iterate through bottom split trapezoids
             same_bottom = crossed_traps[i].bottom
             j = i
             while j < len(crossed_traps) and crossed_traps[j].bottom == same_bottom:
@@ -176,7 +176,11 @@ class TrapezoidalMap:
             left_x = seg_left_x if i == 0 else crossed_traps[i-1].rightx
             right_x = seg_right_x if j == len(crossed_traps) else crossed_traps[j-1].rightx
 
-            t_lower = Trapezoid(seg, same_bottom, left_x, right_x)
+            # Determine Point objects for boundaries
+            left_pt = seg.left if i == 0 else crossed_traps[i-1].right_point
+            right_pt = seg.right if j == len(crossed_traps) else crossed_traps[j-1].right_point
+
+            t_lower = Trapezoid(seg, same_bottom, left_x, right_x, left_pt, right_pt)
             self.trapezoids.add(t_lower)
             traps_below.append(t_lower)
             i = j
@@ -190,27 +194,38 @@ class TrapezoidalMap:
         self._connect_remainder_to_splits(right_remainder, traps_above, traps_below, is_left=False)
 
         # Build the local sub-DAG
-        def chain_by_bounds(traps: List[Trapezoid]) -> Node:
+        # Build a simple left-to-right chain with XNodes at trapezoid boundaries
+        def build_simple_chain(traps: List[Trapezoid]) -> Node:
+            """Build a left-to-right chain of trapezoids with XNodes at boundaries."""
             if not traps:
                 return Leaf(self._dummy_empty_trap())
             if len(traps) == 1:
                 return Leaf(traps[0])
-            traps_sorted = sorted(traps, key=lambda t: (t.leftx, t.rightx))
-            mid = len(traps_sorted) // 2
-            left_chain = chain_by_bounds(traps_sorted[:mid])
-            right_chain = chain_by_bounds(traps_sorted[mid:])
-            split_x = traps_sorted[mid].leftx
-            return XNode(split_x, left_chain, right_chain)
 
-        above_chain = chain_by_bounds(traps_above)
-        below_chain = chain_by_bounds(traps_below)
+            # Sort trapezoids left-to-right
+            traps_sorted = sorted(traps, key=lambda t: t.leftx)
+
+            # Build chain from right to left
+            result = Leaf(traps_sorted[-1])
+            for i in range(len(traps_sorted) - 2, -1, -1):
+                trap = traps_sorted[i]
+                # The Point that separates this trapezoid from the next one
+                # is the right_point of the current trapezoid
+                split_point = trap.right_point
+                result = XNode(split_point, Leaf(trap), result)
+
+            return result
+
+        above_chain = build_simple_chain(traps_above)
+        below_chain = build_simple_chain(traps_below)
         y_node = YNode(seg, above_chain, below_chain)
 
         # Wrap with XNodes at the ends if remainders were created
+        # These XNodes correspond to the segment's actual endpoints
         if left_remainder is not None:
-            y_node = XNode(traps_above[0].leftx, Leaf(left_remainder), y_node)
+            y_node = XNode(seg.left, Leaf(left_remainder), y_node)
         if right_remainder is not None:
-            y_node = XNode(traps_above[-1].rightx, y_node, Leaf(right_remainder))
+            y_node = XNode(seg.right, y_node, Leaf(right_remainder))
         return y_node
 
     def _trapezoids_are_vertically_adjacent(self, left_trap: Trapezoid, right_trap: Trapezoid, x_boundary: float) -> bool:
@@ -226,8 +241,7 @@ class TrapezoidalMap:
 
     def _connect_neighbors(self, old_traps: List[Trapezoid], new_traps: List[Trapezoid]):
         """
-        Update neighbor pointers when replacing old trapezoids with new ones.
-        Efficiently handles O(k × d) neighbor updates instead of O(k²).
+        Update neighbor pointers when replacing old trapezoids with new ones (O(kd) updates).
         """
         # Collect all neighbors from crossed trapezoids
         all_left_neighbors = set()
@@ -306,7 +320,7 @@ class TrapezoidalMap:
                 target_below.right_neighbors.append(remainder)
     
     def _dummy_empty_trap(self) -> Trapezoid:
-        t = Trapezoid(None, None, self.bbox_x_min, self.bbox_x_min)
+        t = Trapezoid(None, None, self.bbox_x_min, self.bbox_x_min, None, None)
         self.trapezoids.add(t)
         return t
     
@@ -376,62 +390,25 @@ class TrapezoidalMap:
         # Add final leaf node
         path_nodes.append(node)
 
-        # Generate node-to-label mapping
-        all_nodes = []
-        node_to_index = {}
-
-        def collect_nodes(n: Node):
-            if n in node_to_index:
-                return
-            node_to_index[n] = len(all_nodes)
-            all_nodes.append(n)
+        # Build path string using existing labels from Point/Segment/Trapezoid objects
+        path_labels = []
+        for n in path_nodes:
             if isinstance(n, XNode):
-                collect_nodes(n.left)
-                collect_nodes(n.right)
+                # Use the label from the Point object
+                path_labels.append(n.point.label)
             elif isinstance(n, YNode):
-                collect_nodes(n.above)
-                collect_nodes(n.below)
+                # Use the label from the Segment object
+                path_labels.append(n.seg.label)
+            elif isinstance(n, Leaf):
+                # Use the label from the Trapezoid object
+                path_labels.append(n.trap.label if n.trap.label else "T?")
 
-        collect_nodes(self.root)
-
-        # Separate and label nodes properly
-        x_nodes = [n for n in all_nodes if isinstance(n, XNode)]
-        y_nodes = [n for n in all_nodes if isinstance(n, YNode)]
-        leaf_nodes = [n for n in all_nodes if isinstance(n, Leaf)]
-
-        # Build node-to-label mapping
-        node_to_label = {}
-
-        # Sort and label X-nodes as P/Q
-        x_nodes_sorted = sorted(x_nodes, key=lambda n: n.x)
-        p_counter = 1
-        q_counter = 1
-        for xnode in x_nodes_sorted:
-            # Check if it's a left endpoint
-            is_left = any(abs(yseg.seg.left.x - xnode.x) < utils.EPS for yseg in y_nodes)
-            if is_left:
-                node_to_label[xnode] = f"P{p_counter}"
-                p_counter += 1
-            else:
-                node_to_label[xnode] = f"Q{q_counter}"
-                q_counter += 1
-
-        # Label Y-nodes as S1, S2, etc.
-        y_nodes_sorted = sorted(y_nodes, key=lambda n: int(n.seg.label[1:]))
-        for i, ynode in enumerate(y_nodes_sorted, start=1):
-            node_to_label[ynode] = f"S{i}"
-
-        # Label Leaf nodes as T1, T2, etc.
-        for i, leaf in enumerate(leaf_nodes, start=1):
-            node_to_label[leaf] = f"T{i}"
-
-        # Build path string
-        path_labels = [node_to_label.get(n, '?') for n in path_nodes]
         return ' '.join(path_labels), path_nodes
 
     def generate_adjacency_matrix(self) -> Tuple[List[str], List[List[int]]]:
         """
         Generate the adjacency matrix for the DAG structure.
+        Nodes referencing the same Point/Segment/Trapezoid are merged into a single entry.
         Returns (node_labels, matrix) where matrix[child][parent] = 1.
         """
         # Collect all nodes by traversing the DAG
@@ -453,85 +430,123 @@ class TrapezoidalMap:
 
         collect_nodes(self.root)
 
-        # Separate nodes by type and assign labels
-        x_nodes = []  # Point nodes (P and Q)
-        y_nodes = []  # Segment nodes (S)
-        leaf_nodes = []  # Trapezoid nodes (T)
+        # Group nodes by their underlying Point/Segment/Trapezoid objects
+        point_to_xnodes = {}    # Point object id → list of XNodes
+        seg_to_ynodes = {}      # Segment object id → list of YNodes
+        trap_to_leaves = {}     # Trapezoid object id → list of Leaves
 
         for node in all_nodes:
             if isinstance(node, XNode):
-                x_nodes.append(node)
+                point_id = id(node.point)
+                point_to_xnodes.setdefault(point_id, []).append(node)
             elif isinstance(node, YNode):
-                y_nodes.append(node)
+                seg_id = id(node.seg)
+                seg_to_ynodes.setdefault(seg_id, []).append(node)
             elif isinstance(node, Leaf):
-                leaf_nodes.append(node)
+                trap_id = id(node.trap)
+                trap_to_leaves.setdefault(trap_id, []).append(node)
 
-        # Create mapping from segments to their labels
-        segment_to_label = {}
-        for node in y_nodes:
-            if node.seg not in segment_to_label:
-                segment_to_label[node.seg] = f"S{node.seg.label[1:]}"  # Extract number from label
+        # Create unique representative nodes (one per unique object)
+        # Store both the representative object and the label
+        unique_points = {}      # point_id → (Point object, list of XNodes)
+        unique_segments = {}    # seg_id → (Segment object, list of YNodes)
+        unique_traps = {}       # trap_id → (Trapezoid object, list of Leaves)
 
-        # Build ordered node labels: P1...Pk, Q1...Qk, S1...Sn, T1...Tm
+        for point_id, xnodes in point_to_xnodes.items():
+            unique_points[point_id] = (xnodes[0].point, xnodes)
+
+        for seg_id, ynodes in seg_to_ynodes.items():
+            unique_segments[seg_id] = (ynodes[0].seg, ynodes)
+
+        for trap_id, leaves in trap_to_leaves.items():
+            unique_traps[trap_id] = (leaves[0].trap, leaves)
+
+        # Build ordered list of unique objects with labels
+        # Order: P1, P2, ..., Q1, Q2, ..., S1, S2, ..., T1, T2, ...
         node_labels = []
-        ordered_nodes = []
+        ordered_objects = []  # List of (type, object_id, label)
 
-        # Process X-nodes (points)
-        point_nodes_with_coords = [(node, node.x) for node in x_nodes]
-        point_nodes_with_coords.sort(key=lambda x: x[1])
+        # Separate P and Q nodes
+        p_nodes = []  # Left endpoints (P1, P2, ...)
+        q_nodes = []  # Right endpoints (Q1, Q2, ...)
 
-        p_counter = 1
-        q_counter = 1
-        for node, x_coord in point_nodes_with_coords:
-            # Determine if this is a P or Q node by checking segments
-            # This is a heuristic - check if it's a left or right endpoint
-            is_left_endpoint = False
-            for seg_node in y_nodes:
-                if abs(seg_node.seg.left.x - x_coord) < utils.EPS:
-                    is_left_endpoint = True
-                    break
+        for point_id, (point, xnodes) in unique_points.items():
+            if point.label.startswith('P'):
+                p_nodes.append((point_id, point))
+            else:  # Q nodes
+                q_nodes.append((point_id, point))
 
-            if is_left_endpoint:
-                label = f"P{p_counter}"
-                p_counter += 1
-            else:
-                label = f"Q{q_counter}"
-                q_counter += 1
+        # Sort P nodes by label number
+        p_nodes_sorted = sorted(p_nodes, key=lambda item: int(item[1].label[1:]))
+        for point_id, point in p_nodes_sorted:
+            node_labels.append(point.label)
+            ordered_objects.append(('point', point_id, point.label))
 
+        # Sort Q nodes by label number
+        q_nodes_sorted = sorted(q_nodes, key=lambda item: int(item[1].label[1:]))
+        for point_id, point in q_nodes_sorted:
+            node_labels.append(point.label)
+            ordered_objects.append(('point', point_id, point.label))
+
+        # Sort Segments by label number
+        segments_sorted = sorted(unique_segments.items(),
+                                key=lambda item: int(item[1][0].label[1:]))
+        for seg_id, (seg, _) in segments_sorted:
+            node_labels.append(seg.label)
+            ordered_objects.append(('segment', seg_id, seg.label))
+
+        # Sort Trapezoids by label number
+        traps_sorted = sorted(unique_traps.items(),
+                             key=lambda item: int(item[1][0].label[1:]) if item[1][0].label and item[1][0].label[0] == 'T' else float('inf'))
+        for trap_id, (trap, _) in traps_sorted:
+            label = trap.label if trap.label else "T?"
             node_labels.append(label)
-            ordered_nodes.append(node)
+            ordered_objects.append(('trapezoid', trap_id, label))
 
-        # Process Y-nodes (segments)
-        segment_nodes_sorted = sorted(y_nodes, key=lambda n: int(n.seg.label[1:]))
-        for node in segment_nodes_sorted:
-            node_labels.append(segment_to_label[node.seg])
-            ordered_nodes.append(node)
+        # Create mapping from object_id to matrix index
+        object_to_index = {}
+        for idx, (obj_type, obj_id, _) in enumerate(ordered_objects):
+            object_to_index[(obj_type, obj_id)] = idx
 
-        # Process Leaf nodes (trapezoids)
-        for i, node in enumerate(leaf_nodes, start=1):
-            node_labels.append(f"T{i}")
-            ordered_nodes.append(node)
-
-        # Create index mapping for ordered nodes
-        ordered_index = {node: i for i, node in enumerate(ordered_nodes)}
-
-        # Build adjacency matrix: matrix[child][parent] = 1
-        n = len(ordered_nodes)
+        # Build adjacency matrix by merging relationships from all nodes with same object
+        n = len(ordered_objects)
         matrix = [[0] * n for _ in range(n)]
 
-        for parent in ordered_nodes:
-            parent_idx = ordered_index[parent]
-            children = []
+        # Helper to get object_id and type for a node
+        def get_object_key(node: Node) -> Tuple[str, int]:
+            if isinstance(node, XNode):
+                return ('point', id(node.point))
+            elif isinstance(node, YNode):
+                return ('segment', id(node.seg))
+            elif isinstance(node, Leaf):
+                return ('trapezoid', id(node.trap))
+            return None
 
-            if isinstance(parent, XNode):
-                children = [parent.left, parent.right]
-            elif isinstance(parent, YNode):
-                children = [parent.above, parent.below]
+        # Collect all parent-child relationships
+        for obj_type, obj_id, _ in ordered_objects:
+            # Get all nodes with this object
+            if obj_type == 'point':
+                nodes = unique_points[obj_id][1]
+            elif obj_type == 'segment':
+                nodes = unique_segments[obj_id][1]
+            else:  # trapezoid
+                nodes = unique_traps[obj_id][1]
 
-            for child in children:
-                if child in ordered_index:
-                    child_idx = ordered_index[child]
-                    matrix[child_idx][parent_idx] = 1
+            parent_idx = object_to_index[(obj_type, obj_id)]
+
+            # Collect all children from all nodes with this object
+            for node in nodes:
+                children = []
+                if isinstance(node, XNode):
+                    children = [node.left, node.right]
+                elif isinstance(node, YNode):
+                    children = [node.above, node.below]
+
+                for child in children:
+                    child_key = get_object_key(child)
+                    if child_key and child_key in object_to_index:
+                        child_idx = object_to_index[child_key]
+                        matrix[child_idx][parent_idx] = 1
 
         return node_labels, matrix
 
@@ -619,6 +634,15 @@ class TrapezoidalMap:
             ax.plot([xl, xl], [y_bot_left, y_top_left], 'k-', linewidth=1, alpha=0.5)
             ax.plot([xr, xr], [y_bot_right, y_top_right], 'k-', linewidth=1, alpha=0.5)
 
+            # Add trapezoid label at the center
+            if trap.label:
+                center_x = (xl + xr) / 2
+                center_y = (y_top_left + y_top_right + y_bot_left + y_bot_right) / 4
+                ax.text(center_x, center_y, trap.label,
+                       fontsize=10, ha='center', va='center',
+                       fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+
         for seg in segments_set:
             ax.plot([seg.left.x, seg.right.x], [seg.left.y, seg.right.y],
                    'b-', linewidth=2, marker='o', markersize=4, label=seg.label)
@@ -636,10 +660,6 @@ class TrapezoidalMap:
 
         plt.tight_layout()
         plt.show()
-
-
-def build_adjmat(trap_map: TrapezoidalMap):
-    pass
 
 
 #####################
