@@ -136,6 +136,7 @@ class Segment:
 
 class Trapezoid:
     def __init__(self, top: Optional[Segment], bottom: Optional[Segment], leftx: float, rightx: float):
+        self.label = None
         # Trapezoid bounds
         self.top = top
         self.bottom = bottom
