@@ -165,15 +165,44 @@ class Trapezoid:
 # === DAG Structures ===
 
 class Node:
-    # Exists purely as a parent class to XNode and YNode
-    pass
+    # Base class for all DAG nodes
+    def __init__(self):
+        self.parent = None  # Parent node in the DAG
 
 
 class XNode(Node):
     def __init__(self, point: Point, left: Node, right: Node):
+        super().__init__()
         self.point = point
+        self._left = None
+        self._right = None
+        # Use property setters to establish parent pointers
         self.left = left
         self.right = right
+
+    @property
+    def left(self):
+        return self._left
+
+    @left.setter
+    def left(self, node):
+        if self._left is not None:
+            self._left.parent = None
+        self._left = node
+        if node is not None:
+            node.parent = self
+
+    @property
+    def right(self):
+        return self._right
+
+    @right.setter
+    def right(self, node):
+        if self._right is not None:
+            self._right.parent = None
+        self._right = node
+        if node is not None:
+            node.parent = self
 
     @property
     def x(self) -> float:
@@ -183,13 +212,42 @@ class XNode(Node):
 
 class YNode(Node):
     def __init__(self, seg: Segment, above: Node, below: Node):
+        super().__init__()
         self.seg = seg
+        self._above = None
+        self._below = None
+        # Use property setters to establish parent pointers
         self.above = above
         self.below = below
+
+    @property
+    def above(self):
+        return self._above
+
+    @above.setter
+    def above(self, node):
+        if self._above is not None:
+            self._above.parent = None
+        self._above = node
+        if node is not None:
+            node.parent = self
+
+    @property
+    def below(self):
+        return self._below
+
+    @below.setter
+    def below(self, node):
+        if self._below is not None:
+            self._below.parent = None
+        self._below = node
+        if node is not None:
+            node.parent = self
 
 
 class Leaf(Node):
     def __init__(self, trap: Trapezoid):
+        super().__init__()
         self.trap = trap
         trap.leaf = self    # set trapezoid back-pointer
 

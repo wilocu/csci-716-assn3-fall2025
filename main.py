@@ -99,7 +99,7 @@ class TrapezoidalMap:
         
     def _insert_segment(self, seg: Segment):
         """Insert segment into trapezoidal map. Expected O(logn) time."""
-        # Locate starting trapezoid containing segment's left endpoint
+        # (1) Locate starting trapezoid containing segment's left endpoint
         t = self.locate_point(seg.left)
 
         crossed_traps: List[Trapezoid] = []
@@ -115,120 +115,468 @@ class TrapezoidalMap:
             if t is None:
                 raise RuntimeError(f"Could not find next trapezoid for segment {seg.label}")
 
-        # (3) split crossed trapezoids with the segment and build a local sub-DAG
-        sub = self._split_crossed(crossed_traps, seg)
-        self._splice(crossed_traps, sub)
+        # (3) Split crossed trapezoids and build sub-DAG
+        # This creates new trapezoids and adds them to self.trapezoids
+        sub_dag = self._split_crossed(crossed_traps, seg)
+
+        # (4) Splice: replace ALL crossed trapezoid leaves with the same sub-DAG
+        for trap in crossed_traps:
+            self._splice_trapezoid(trap, sub_dag)
+
+        # (5) Remove old crossed trapezoids from the set
         self.trapezoids.difference_update(crossed_traps)
 
-        # Clean up obsolete neighbor pointers
+        # (6) Clean up obsolete neighbor pointers
         for trap in self.trapezoids:
             trap.left_neighbors = [n for n in trap.left_neighbors if n in self.trapezoids]
             trap.right_neighbors = [n for n in trap.right_neighbors if n in self.trapezoids]
-    
+
+    def _update_external_neighbors(self, old_traps: List[Trapezoid], new_traps: List[Trapezoid]):
+        """
+        Update neighbor pointers of external trapezoids (not in old_traps)
+        to point to new trapezoids instead of old trapezoids.
+        """
+        old_trap_set = set(old_traps)
+
+        # Build spatial index for new trapezoids by their left and right x-coordinates
+        new_by_leftx = {}
+        new_by_rightx = {}
+        for trap in new_traps:
+            if trap.leftx not in new_by_leftx:
+                new_by_leftx[trap.leftx] = []
+            new_by_leftx[trap.leftx].append(trap)
+
+            if trap.rightx not in new_by_rightx:
+                new_by_rightx[trap.rightx] = []
+            new_by_rightx[trap.rightx].append(trap)
+
+        # Update all trapezoids that have old trapezoids as neighbors
+        for trap in self.trapezoids:
+            if trap in old_trap_set:
+                continue  # Skip trapezoids that are being deleted
+
+            # Update left neighbors
+            new_left_neighbors = []
+            for neighbor in trap.left_neighbors:
+                if neighbor in old_trap_set:
+                    # This neighbor is being deleted, find replacement
+                    # Look for new trapezoids at the same x-boundary
+                    replacements = new_by_rightx.get(trap.leftx, [])
+                    for new_trap in replacements:
+                        # Check if vertically adjacent
+                        if self._trapezoids_are_vertically_adjacent(new_trap, trap, trap.leftx):
+                            new_left_neighbors.append(new_trap)
+                else:
+                    new_left_neighbors.append(neighbor)
+            trap.left_neighbors = new_left_neighbors
+
+            # Update right neighbors
+            new_right_neighbors = []
+            for neighbor in trap.right_neighbors:
+                if neighbor in old_trap_set:
+                    # This neighbor is being deleted, find replacement
+                    # Look for new trapezoids at the same x-boundary
+                    replacements = new_by_leftx.get(trap.rightx, [])
+                    for new_trap in replacements:
+                        # Check if vertically adjacent
+                        if self._trapezoids_are_vertically_adjacent(trap, new_trap, trap.rightx):
+                            new_right_neighbors.append(new_trap)
+                else:
+                    new_right_neighbors.append(neighbor)
+            trap.right_neighbors = new_right_neighbors
+
+    def _determine_case(self, trap: Trapezoid, seg: Segment) -> int:
+        """
+        Determine which of the 3 cases applies for inserting a segment into a trapezoid.
+
+        Case 1: Exactly one endpoint is strictly within the trapezoid (not on left/right boundary)
+        Case 2: Both endpoints are strictly within the trapezoid
+        Case 3: Neither endpoint is strictly within the trapezoid (segment passes through)
+
+        Returns: 1, 2, or 3
+        """
+        EPS = utils.EPS
+
+        # Check if left endpoint is strictly inside trapezoid (not on boundaries)
+        left_in = (trap.leftx + EPS < seg.left.x < trap.rightx - EPS)
+
+        # Check if right endpoint is strictly inside trapezoid (not on boundaries)
+        right_in = (trap.leftx + EPS < seg.right.x < trap.rightx - EPS)
+
+        if left_in and right_in:
+            return 2  # Both endpoints inside
+        elif left_in or right_in:
+            return 1  # Exactly one endpoint inside
+        else:
+            return 3  # Neither endpoint inside (passes through)
+
+    def _build_case3_subdag(self, trap: Trapezoid, seg: Segment) -> Tuple[Node, List[Trapezoid]]:
+        """
+        Case 3: Neither endpoint in trapezoid (segment passes through).
+        Split into 2 trapezoids: above and below.
+        Returns: (YNode root, [above_trap, below_trap])
+        """
+        # Create trapezoid above the segment
+        above_trap = Trapezoid(
+            top=trap.top,
+            bottom=seg,
+            leftx=trap.leftx,
+            rightx=trap.rightx,
+            left_point=trap.left_point,
+            right_point=trap.right_point
+        )
+
+        # Create trapezoid below the segment
+        below_trap = Trapezoid(
+            top=seg,
+            bottom=trap.bottom,
+            leftx=trap.leftx,
+            rightx=trap.rightx,
+            left_point=trap.left_point,
+            right_point=trap.right_point
+        )
+
+        # Inherit neighbor pointers from original trapezoid
+        above_trap.left_neighbors = trap.left_neighbors.copy()
+        above_trap.right_neighbors = trap.right_neighbors.copy()
+        below_trap.left_neighbors = trap.left_neighbors.copy()
+        below_trap.right_neighbors = trap.right_neighbors.copy()
+
+        # Build sub-DAG: YNode with leaves for above and below
+        above_leaf = Leaf(above_trap)
+        below_leaf = Leaf(below_trap)
+        y_node = YNode(seg, above_leaf, below_leaf)
+
+        return y_node, [above_trap, below_trap]
+
+    def _build_case1_subdag(self, trap: Trapezoid, seg: Segment) -> Tuple[Node, List[Trapezoid]]:
+        """
+        Case 1: One endpoint in trapezoid (other on or outside boundary).
+        Split into 3 trapezoids: remainder (left OR right), above, below.
+        Returns: (XNode root, [remainder_trap, above_trap, below_trap])
+        """
+        EPS = utils.EPS
+
+        # Determine which endpoint is inside
+        left_in = (trap.leftx + EPS < seg.left.x < trap.rightx - EPS)
+        right_in = (trap.leftx + EPS < seg.right.x < trap.rightx - EPS)
+
+        if left_in:
+            # Left endpoint is inside, create left remainder
+            endpoint = seg.left
+            is_left_remainder = True
+
+            # Remainder trapezoid (from trap.leftx to endpoint.x)
+            remainder = Trapezoid(
+                top=trap.top,
+                bottom=trap.bottom,
+                leftx=trap.leftx,
+                rightx=endpoint.x,
+                left_point=trap.left_point,
+                right_point=endpoint
+            )
+
+            # Above trapezoid (from endpoint.x to trap.rightx)
+            above_trap = Trapezoid(
+                top=trap.top,
+                bottom=seg,
+                leftx=endpoint.x,
+                rightx=trap.rightx,
+                left_point=endpoint,
+                right_point=trap.right_point
+            )
+
+            # Below trapezoid (from endpoint.x to trap.rightx)
+            below_trap = Trapezoid(
+                top=seg,
+                bottom=trap.bottom,
+                leftx=endpoint.x,
+                rightx=trap.rightx,
+                left_point=endpoint,
+                right_point=trap.right_point
+            )
+
+            # Set up neighbor pointers
+            remainder.left_neighbors = trap.left_neighbors.copy()
+            remainder.right_neighbors = [above_trap, below_trap]
+            above_trap.left_neighbors = [remainder]
+            above_trap.right_neighbors = trap.right_neighbors.copy()
+            below_trap.left_neighbors = [remainder]
+            below_trap.right_neighbors = trap.right_neighbors.copy()
+        else:
+            # Right endpoint is inside, create right remainder
+            endpoint = seg.right
+            is_left_remainder = False
+
+            # Remainder trapezoid (from endpoint.x to trap.rightx)
+            remainder = Trapezoid(
+                top=trap.top,
+                bottom=trap.bottom,
+                leftx=endpoint.x,
+                rightx=trap.rightx,
+                left_point=endpoint,
+                right_point=trap.right_point
+            )
+
+            # Above trapezoid (from trap.leftx to endpoint.x)
+            above_trap = Trapezoid(
+                top=trap.top,
+                bottom=seg,
+                leftx=trap.leftx,
+                rightx=endpoint.x,
+                left_point=trap.left_point,
+                right_point=endpoint
+            )
+
+            # Below trapezoid (from trap.leftx to endpoint.x)
+            below_trap = Trapezoid(
+                top=seg,
+                bottom=trap.bottom,
+                leftx=trap.leftx,
+                rightx=endpoint.x,
+                left_point=trap.left_point,
+                right_point=endpoint
+            )
+
+            # Set up neighbor pointers
+            remainder.left_neighbors = [above_trap, below_trap]
+            remainder.right_neighbors = trap.right_neighbors.copy()
+            above_trap.left_neighbors = trap.left_neighbors.copy()
+            above_trap.right_neighbors = [remainder]
+            below_trap.left_neighbors = trap.left_neighbors.copy()
+            below_trap.right_neighbors = [remainder]
+
+        # Build sub-DAG
+        above_leaf = Leaf(above_trap)
+        below_leaf = Leaf(below_trap)
+        y_node = YNode(seg, above_leaf, below_leaf)
+        remainder_leaf = Leaf(remainder)
+
+        if is_left_remainder:
+            # XNode: left = remainder, right = YNode
+            x_node = XNode(endpoint, remainder_leaf, y_node)
+        else:
+            # XNode: left = YNode, right = remainder
+            x_node = XNode(endpoint, y_node, remainder_leaf)
+
+        return x_node, [remainder, above_trap, below_trap]
+
+    def _build_case2_subdag(self, trap: Trapezoid, seg: Segment) -> Tuple[Node, List[Trapezoid]]:
+        """
+        Case 2: Both endpoints in same trapezoid.
+        Split into 4 trapezoids: left_remainder, right_remainder, above, below.
+        Returns: (XNode root, [left_rem, right_rem, above_trap, below_trap])
+        """
+        # Left remainder (from trap.leftx to seg.left.x)
+        left_remainder = Trapezoid(
+            top=trap.top,
+            bottom=trap.bottom,
+            leftx=trap.leftx,
+            rightx=seg.left.x,
+            left_point=trap.left_point,
+            right_point=seg.left
+        )
+
+        # Right remainder (from seg.right.x to trap.rightx)
+        right_remainder = Trapezoid(
+            top=trap.top,
+            bottom=trap.bottom,
+            leftx=seg.right.x,
+            rightx=trap.rightx,
+            left_point=seg.right,
+            right_point=trap.right_point
+        )
+
+        # Above trapezoid (from seg.left.x to seg.right.x)
+        above_trap = Trapezoid(
+            top=trap.top,
+            bottom=seg,
+            leftx=seg.left.x,
+            rightx=seg.right.x,
+            left_point=seg.left,
+            right_point=seg.right
+        )
+
+        # Below trapezoid (from seg.left.x to seg.right.x)
+        below_trap = Trapezoid(
+            top=seg,
+            bottom=trap.bottom,
+            leftx=seg.left.x,
+            rightx=seg.right.x,
+            left_point=seg.left,
+            right_point=seg.right
+        )
+
+        # Set up neighbor pointers
+        left_remainder.left_neighbors = trap.left_neighbors.copy()
+        left_remainder.right_neighbors = [above_trap, below_trap]
+        right_remainder.left_neighbors = [above_trap, below_trap]
+        right_remainder.right_neighbors = trap.right_neighbors.copy()
+        above_trap.left_neighbors = [left_remainder]
+        above_trap.right_neighbors = [right_remainder]
+        below_trap.left_neighbors = [left_remainder]
+        below_trap.right_neighbors = [right_remainder]
+
+        # Build sub-DAG:
+        # XNode(left_pt) -> left_rem, XNode(right_pt) -> YNode(seg) -> {above, below}, right_rem
+        above_leaf = Leaf(above_trap)
+        below_leaf = Leaf(below_trap)
+        y_node = YNode(seg, above_leaf, below_leaf)
+
+        right_remainder_leaf = Leaf(right_remainder)
+        right_x_node = XNode(seg.right, y_node, right_remainder_leaf)
+
+        left_remainder_leaf = Leaf(left_remainder)
+        left_x_node = XNode(seg.left, left_remainder_leaf, right_x_node)
+
+        return left_x_node, [left_remainder, right_remainder, above_trap, below_trap]
+
     def _split_crossed(self, crossed_traps: List[Trapezoid], seg: Segment) -> Node:
-        """Split crossed trapezoids, creating new trapezoids above/below segment."""
-        traps_above, traps_below = [], []
-        left_remainder, right_remainder = None, None
-
+        """
+        Split crossed trapezoids and build a single sub-DAG for the segment insertion.
+        The 3 cases are:
+        - Case 1: One endpoint inside the first/last crossed trapezoid
+        - Case 2: Both endpoints in the same trapezoid (only 1 trapezoid crossed)
+        - Case 3: Segment passes through (endpoints on boundaries or multiple trapezoids)
+        Returns: Root node of the sub-DAG
+        """
         t_first, t_last = crossed_traps[0], crossed_traps[-1]
-        seg_left_x = max(seg.xmin, t_first.leftx)
-        seg_right_x = min(seg.xmax, t_last.rightx)
+        EPS = utils.EPS
 
-        if seg_left_x - t_first.leftx > utils.EPS:
-            left_remainder = Trapezoid(t_first.top, t_first.bottom, t_first.leftx, seg_left_x,
-                                      t_first.left_point, seg.left)
+        # Determine the effective left/right x-coordinates for the segment within crossed region
+        seg_left_x = max(seg.left.x, t_first.leftx)
+        seg_right_x = min(seg.right.x, t_last.rightx)
+
+        # Check if segment endpoints are strictly inside the first/last trapezoids
+        left_endpoint_inside = (t_first.leftx + EPS < seg.left.x < t_first.rightx - EPS)
+        right_endpoint_inside = (t_last.leftx + EPS < seg.right.x < t_last.rightx - EPS)
+
+        # Determine which case
+        only_one_trapezoid = (len(crossed_traps) == 1)
+
+        if only_one_trapezoid and left_endpoint_inside and right_endpoint_inside:
+            # CASE 2: Both endpoints strictly inside one trapezoid
+            sub_dag, new_traps = self._build_case2_subdag(t_first, seg)
+            # Add new trapezoids to the set and update neighbors
+            for trap in new_traps:
+                self.trapezoids.add(trap)
+            # Connect neighbors
+            self._connect_neighbors(crossed_traps, new_traps)
+            self._connect_horizontal_neighbors([new_traps[2]])  # above trapezoid
+            self._connect_horizontal_neighbors([new_traps[3]])  # below trapezoid
+            self._connect_remainder_to_splits(new_traps[0], [new_traps[2]], [new_traps[3]], is_left=True)  # left_remainder
+            self._connect_remainder_to_splits(new_traps[1], [new_traps[2]], [new_traps[3]], is_left=False)  # right_remainder
+            return sub_dag
+
+        # Build remainders if endpoints are strictly inside boundaries
+        left_remainder = None
+        right_remainder = None
+
+        if left_endpoint_inside:
+            # CASE 1: Left endpoint inside, create left remainder
+            left_remainder = Trapezoid(
+                top=t_first.top,
+                bottom=t_first.bottom,
+                leftx=t_first.leftx,
+                rightx=seg.left.x,
+                left_point=t_first.left_point,
+                right_point=seg.left
+            )
             left_remainder.left_neighbors = t_first.left_neighbors.copy()
             self.trapezoids.add(left_remainder)
 
-        if t_last.rightx - seg_right_x > utils.EPS:
-            right_remainder = Trapezoid(t_last.top, t_last.bottom, seg_right_x, t_last.rightx,
-                                       seg.right, t_last.right_point)
+        if right_endpoint_inside:
+            # CASE 1: Right endpoint inside, create right remainder
+            right_remainder = Trapezoid(
+                top=t_last.top,
+                bottom=t_last.bottom,
+                leftx=seg.right.x,
+                rightx=t_last.rightx,
+                left_point=seg.right,
+                right_point=t_last.right_point
+            )
             right_remainder.right_neighbors = t_last.right_neighbors.copy()
             self.trapezoids.add(right_remainder)
 
-        # Merge consecutive crossed trapezoids with same top/bottom into single trapezoids
+        # Merge consecutive crossed trapezoids with same top/bottom
+        traps_above, traps_below = [], []
+
+        # Merge above trapezoids
         i = 0
         while i < len(crossed_traps):
-            # First iterate through top split trapezoids
             same_top = crossed_traps[i].top
             j = i
             while j < len(crossed_traps) and crossed_traps[j].top == same_top:
                 j += 1
 
-            left_x = seg_left_x if i == 0 else crossed_traps[i-1].rightx
+            # Determine boundaries for merged trapezoid
+            left_x = seg_left_x if i == 0 else crossed_traps[i].leftx
             right_x = seg_right_x if j == len(crossed_traps) else crossed_traps[j-1].rightx
-
-            # Determine Point objects for boundaries
-            left_pt = seg.left if i == 0 else crossed_traps[i-1].right_point
-            right_pt = seg.right if j == len(crossed_traps) else crossed_traps[j-1].right_point
+            left_pt = seg.left if i == 0 and left_endpoint_inside else crossed_traps[i].left_point
+            right_pt = seg.right if j == len(crossed_traps) and right_endpoint_inside else crossed_traps[j-1].right_point
 
             t_upper = Trapezoid(same_top, seg, left_x, right_x, left_pt, right_pt)
             self.trapezoids.add(t_upper)
             traps_above.append(t_upper)
             i = j
 
+        # Merge below trapezoids
         i = 0
         while i < len(crossed_traps):
-            # Then iterate through bottom split trapezoids
             same_bottom = crossed_traps[i].bottom
             j = i
             while j < len(crossed_traps) and crossed_traps[j].bottom == same_bottom:
                 j += 1
 
-            left_x = seg_left_x if i == 0 else crossed_traps[i-1].rightx
+            # Determine boundaries for merged trapezoid
+            left_x = seg_left_x if i == 0 else crossed_traps[i].leftx
             right_x = seg_right_x if j == len(crossed_traps) else crossed_traps[j-1].rightx
-
-            # Determine Point objects for boundaries
-            left_pt = seg.left if i == 0 else crossed_traps[i-1].right_point
-            right_pt = seg.right if j == len(crossed_traps) else crossed_traps[j-1].right_point
+            left_pt = seg.left if i == 0 and left_endpoint_inside else crossed_traps[i].left_point
+            right_pt = seg.right if j == len(crossed_traps) and right_endpoint_inside else crossed_traps[j-1].right_point
 
             t_lower = Trapezoid(seg, same_bottom, left_x, right_x, left_pt, right_pt)
             self.trapezoids.add(t_lower)
             traps_below.append(t_lower)
             i = j
 
-        # Update neighbor pointers using helper methods
-        new_traps = [left_remainder] + traps_above + traps_below + ([right_remainder] if right_remainder else [])
+        # Update neighbor pointers
+        new_traps = ([left_remainder] if left_remainder else []) + traps_above + traps_below + ([right_remainder] if right_remainder else [])
         self._connect_neighbors(crossed_traps, new_traps)
         self._connect_horizontal_neighbors(traps_above)
         self._connect_horizontal_neighbors(traps_below)
         self._connect_remainder_to_splits(left_remainder, traps_above, traps_below, is_left=True)
         self._connect_remainder_to_splits(right_remainder, traps_above, traps_below, is_left=False)
 
-        # Build the local sub-DAG
-        # Build a simple left-to-right chain with XNodes at trapezoid boundaries
-        def build_simple_chain(traps: List[Trapezoid]) -> Node:
-            """Build a left-to-right chain of trapezoids with XNodes at boundaries."""
-            if not traps:
-                return Leaf(self._dummy_empty_trap())
-            if len(traps) == 1:
-                return Leaf(traps[0])
+        # Build the sub-DAG correctly based on the case
+        # Create YNode for the segment with above/below as single leaves
+        above_node = Leaf(traps_above[0]) if len(traps_above) == 1 else self._build_chain(traps_above)
+        below_node = Leaf(traps_below[0]) if len(traps_below) == 1 else self._build_chain(traps_below)
+        y_node = YNode(seg, above_node, below_node)
 
-            # Sort trapezoids left-to-right
-            traps_sorted = sorted(traps, key=lambda t: t.leftx)
-
-            # Build chain from right to left
-            result = Leaf(traps_sorted[-1])
-            for i in range(len(traps_sorted) - 2, -1, -1):
-                trap = traps_sorted[i]
-                # The Point that separates this trapezoid from the next one
-                # is the right_point of the current trapezoid
-                split_point = trap.right_point
-                result = XNode(split_point, Leaf(trap), result)
-
-            return result
-
-        above_chain = build_simple_chain(traps_above)
-        below_chain = build_simple_chain(traps_below)
-        y_node = YNode(seg, above_chain, below_chain)
-
-        # Wrap with XNodes at the ends if remainders were created
-        # These XNodes correspond to the segment's actual endpoints
-        if left_remainder is not None:
+        # Wrap with XNodes for endpoints if needed
+        if left_remainder:
             y_node = XNode(seg.left, Leaf(left_remainder), y_node)
-        if right_remainder is not None:
+        if right_remainder:
             y_node = XNode(seg.right, y_node, Leaf(right_remainder))
+
         return y_node
+
+    def _build_chain(self, traps: List[Trapezoid]) -> Node:
+        """Build a left-to-right chain of trapezoids with XNodes at boundaries."""
+        if len(traps) == 1:
+            return Leaf(traps[0])
+
+        # Sort left to right
+        traps_sorted = sorted(traps, key=lambda t: t.leftx)
+
+        # Build chain from right to left
+        result = Leaf(traps_sorted[-1])
+        for i in range(len(traps_sorted) - 2, -1, -1):
+            trap = traps_sorted[i]
+            split_point = trap.right_point
+            result = XNode(split_point, Leaf(trap), result)
+
+        return result
 
     def _trapezoids_are_vertically_adjacent(self, left_trap: Trapezoid, right_trap: Trapezoid, x_boundary: float) -> bool:
         """Check if two trapezoids are vertically adjacent at x_boundary."""
@@ -326,44 +674,33 @@ class TrapezoidalMap:
         self.trapezoids.add(t)
         return t
     
-    def _splice(self, crossed_traps: List[Trapezoid], sub_dag: Node):
+    def _splice_trapezoid(self, old_trap: Trapezoid, new_subdag: Node):
         """
-        Replace crossed trapezoids' leaves in DAG with sub_dag.
-        Expected O(klogn) where k = # crossed trapezoids, E[k] = O(1).
+        Replace a single trapezoid's leaf with its sub-DAG using parent pointers.
+        O(1) operation.
         """
-        if not crossed_traps:
+        leaf = old_trap.leaf
+        if leaf is None:
             return
 
-        leaves_to_replace = set()
-        for trap in crossed_traps:
-            if trap.leaf is not None:
-                leaves_to_replace.add(trap.leaf)
+        parent = leaf.parent
 
-        if not leaves_to_replace:
-            return
-
-        def replace_in(node: Node) -> Node:
-            if node in leaves_to_replace:
-                return sub_dag
-            if isinstance(node, XNode):
-                left_result = replace_in(node.left)
-                right_result = replace_in(node.right)
-                if left_result is right_result and left_result is sub_dag:
-                    return sub_dag
-                node.left = left_result
-                node.right = right_result
-                return node
-            if isinstance(node, YNode):
-                above_result = replace_in(node.above)
-                below_result = replace_in(node.below)
-                if above_result is below_result and above_result is sub_dag:
-                    return sub_dag
-                node.above = above_result
-                node.below = below_result
-                return node
-            return node
-
-        self.root = replace_in(self.root)
+        if parent is None:
+            # This leaf is the root of the entire DAG
+            self.root = new_subdag
+            new_subdag.parent = None
+        elif isinstance(parent, XNode):
+            # Replace in parent's left or right child
+            if parent.left == leaf:
+                parent.left = new_subdag  # Property setter handles parent pointer
+            else:
+                parent.right = new_subdag
+        elif isinstance(parent, YNode):
+            # Replace in parent's above or below child
+            if parent.above == leaf:
+                parent.above = new_subdag
+            else:
+                parent.below = new_subdag
 
     def query_point(self, x: float, y: float) -> Tuple[str, List[Node]]:
         """
