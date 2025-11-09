@@ -67,27 +67,10 @@ class TrapezoidalMap:
 
         trap_map = cls(bbox)
 
-        visualize.visualize_trapezoidal_map(trap_map, "Trapezoidal map")
-
         print("Segments:")
         for i, seg in enumerate(labeled_segments):
             print(f"   {seg}")
             trap_map.insert_segment(seg)
-            trap_map._label_trapezoids()
-
-            for t in trap_map.trapezoids:
-                print(t)
-                if t.left_neighbors:
-                    print("   left_neighbors:")
-                    for tl in (t.u_left, t.d_left):
-                        print(f"      {tl}")
-                if t.right_neighbors:
-                    print("   right_neighbors:")
-                    for tr in (t.u_right, t.d_right):
-                        print(f"      {tr}")
-            print("\n\n\n")
-
-            visualize.visualize_trapezoidal_map(trap_map, "Trapezoidal map")
         print()
 
         # Label trapezoids
@@ -119,7 +102,11 @@ class TrapezoidalMap:
 
         # 5. Update trapezoid list
         self.trapezoids = [t for t in self.trapezoids if t not in crossed]
-        new_traps = [left_rem_trap] + above_traps + below_traps + [right_rem_trap]
+        new_traps = above_traps + below_traps
+        if left_rem_trap:
+            new_traps.insert(0, left_rem_trap)
+        if right_rem_trap:
+            new_traps.append(right_rem_trap)
         self.trapezoids.extend(new_traps)
 
     def _find_crossed(self, seg: Segment) -> List[Trapezoid]:
@@ -156,22 +143,28 @@ class TrapezoidalMap:
         self,
         crossed: List[Trapezoid],
         seg: Segment
-    ) -> Tuple[Trapezoid, Trapezoid, List[Trapezoid], List[Trapezoid]]:
+    ) -> Tuple[Optional[Trapezoid], Optional[Trapezoid], List[Trapezoid], List[Trapezoid]]:
         """Create new trapezoids from crossed ones."""
         above_traps = []
         below_traps = []
+        left_rem_trap: Optional[Trapezoid] = None
+        right_rem_trap: Optional[Trapezoid] = None
 
         first, last = crossed[0], crossed[-1]
         seg_left_x = max(seg.xmin, first.leftx)
         seg_right_x = min(seg.xmax, last.rightx)
 
         # create the left-remainder trapezoid (will always exist in the general position)
-        left_rem_trap = Trapezoid(first.top, first.bottom, first.leftx, seg_left_x,
-                     first.left_point, seg.left)
+        if seg_left_x - first.leftx > utils.EPS:
+            t = Trapezoid(first.top, first.bottom, first.leftx, seg_left_x,
+                         first.left_point, seg.left)
+            left_rem_trap = t
 
         # create the right-remainder trapezoid (will always exist in the general position)
-        right_rem_trap = Trapezoid(last.top, last.bottom, seg_right_x, last.rightx,
-                     seg.right, last.right_point)
+        if last.rightx - seg_right_x > utils.EPS:
+            t = Trapezoid(last.top, last.bottom, seg_right_x, last.rightx,
+                         seg.right, last.right_point)
+            right_rem_trap = t
 
         # Trapezoids above segment (merge consecutive with same top boundary)
         i = 0
@@ -223,64 +216,113 @@ class TrapezoidalMap:
         seg: Segment
     ) -> None:
         first, last = crossed[0], crossed[-1]
-        # connect first's left neighbors to left_rem
-        if first.u_left:
-            if first.u_left.u_right == first:
-                first.u_left.u_right = left_rem
-            if first.u_left.d_right == first:
-                first.u_left.d_right = left_rem
-            left_rem.u_left = first.u_left
-        if first.d_left:
-            if first.d_left.d_right == first:
-                first.d_left.d_right = left_rem
-            if first.d_left.u_right == first:
-                first.d_left.u_right = left_rem
-            left_rem.d_left = first.d_left
-        # connect last's right neighbors to left_rem
-        if last.u_right:
-            if last.u_right.u_left == last:
-                last.u_right.u_left = right_rem
-            if last.u_right.d_left == last:
-                last.u_right.d_left = right_rem
-            right_rem.u_right = first.u_right
-        if last.d_right:
-            if last.d_right.d_left == last:
-                last.d_right.d_left = right_rem
-            if last.d_right.u_left == last:
-                last.d_right.u_left = right_rem
-            right_rem.d_right = last.d_right
+        if left_rem:
+            # connect first's left neighbors to left_rem
+            if first.u_left:
+                if first.u_left.u_right == first:
+                    first.u_left.u_right = left_rem
+                if first.u_left.d_right == first:
+                    first.u_left.d_right = left_rem
+                left_rem.u_left = first.u_left
+            if first.d_left:
+                if first.d_left.d_right == first:
+                    first.d_left.d_right = left_rem
+                if first.d_left.u_right == first:
+                    first.d_left.u_right = left_rem
+                left_rem.d_left = first.d_left
+        # connect last's right neighbors to right_rem
+        if right_rem:
+            if last.u_right:
+                if last.u_right.u_left == last:
+                    last.u_right.u_left = right_rem
+                if last.u_right.d_left == last:
+                    last.u_right.d_left = right_rem
+                right_rem.u_right = last.u_right
+            if last.d_right:
+                if last.d_right.d_left == last:
+                    last.d_right.d_left = right_rem
+                if last.d_right.u_left == last:
+                    last.d_right.u_left = right_rem
+                right_rem.d_right = last.d_right
 
-        # connect first above/below trapezoids to left remainder trapezoid
-        above[0].u_left = left_rem
-        above[0].d_left = left_rem
-        left_rem.u_right = above[0]
-        below[0].u_left = left_rem
-        below[0].d_left = left_rem
-        left_rem.d_right = below[0]
-        # connect last above/below trapezoids to right remainder trapezoid
-        above[-1].u_right = right_rem
-        above[-1].d_right = right_rem
-        right_rem.u_left = above[-1]
-        below[-1].u_right = right_rem
-        below[-1].d_right = right_rem
-        right_rem.d_left = below[-1]
+        if left_rem:
+            # connect first above/below trapezoids to left remainder trapezoid
+            above[0].u_left = left_rem
+            above[0].d_left = left_rem
+            left_rem.u_right = above[0]
+            below[0].u_left = left_rem
+            below[0].d_left = left_rem
+            left_rem.d_right = below[0]
+        else:
+            # connect first above/below trapezoids to first's left neighbors
+            # when left_rem doesn't exist, the segment's left endpoint coincides with first's left boundary
+            # inherit first's left neighbors, handling triangle degenerate cases
+
+            # Connect above[0] to first's upper-left neighbor (if above[0] is not a triangle)
+            # above[0] is a triangle if its top segment passes through its left_point
+            above_is_triangle = (above[0].top is not None and
+                                abs(above[0].top.y_at(above[0].leftx) - seg.y_at(above[0].leftx)) < utils.EPS)
+
+            if not above_is_triangle and first.u_left:
+                if first.u_left.u_right == first:
+                    first.u_left.u_right = above[0]
+                if first.u_left.d_right == first:
+                    first.u_left.d_right = above[0]
+                above[0].u_left = first.u_left
+                above[0].d_left = first.u_left
+
+            # Connect below[0] to first's lower-left neighbor (if below[0] is not a triangle)
+            below_is_triangle = (below[0].bottom is not None and
+                                abs(below[0].bottom.y_at(below[0].leftx) - seg.y_at(below[0].leftx)) < utils.EPS)
+
+            if not below_is_triangle and first.d_left:
+                if first.d_left.d_right == first:
+                    first.d_left.d_right = below[0]
+                if first.d_left.u_right == first:
+                    first.d_left.u_right = below[0]
+                below[0].u_left = first.d_left
+                below[0].d_left = first.d_left
+
+
+        if right_rem:
+            # connect last above/below trapezoids to right remainder trapezoid
+            above[-1].u_right = right_rem
+            above[-1].d_right = right_rem
+            right_rem.u_left = above[-1]
+            below[-1].u_right = right_rem
+            below[-1].d_right = right_rem
+            right_rem.d_left = below[-1]
+        else:
+            # connect last above/below trapezoids to last's right neighbors
+            # when right_rem doesn't exist, the segment's right endpoint coincides with last's right boundary
+            # inherit last's right neighbors, handling triangle degenerate cases
+
+            # Connect above[-1] to last's upper-right neighbor (if above[-1] is not a triangle)
+            # above[-1] is a triangle if its top segment passes through its right_point
+            above_is_triangle = (above[-1].top is not None and
+                                abs(above[-1].top.y_at(above[-1].rightx) - seg.y_at(above[-1].rightx)) < utils.EPS)
+
+            if not above_is_triangle and last.u_right:
+                if last.u_right.u_left == last:
+                    last.u_right.u_left = above[-1]
+                if last.u_right.d_left == last:
+                    last.u_right.d_left = above[-1]
+                above[-1].u_right = last.u_right
+                above[-1].d_right = last.u_right
+
+            # Connect below[-1] to last's lower-right neighbor (if below[-1] is not a triangle)
+            below_is_triangle = (below[-1].bottom is not None and
+                                abs(below[-1].bottom.y_at(below[-1].rightx) - seg.y_at(below[-1].rightx)) < utils.EPS)
+
+            if not below_is_triangle and last.d_right:
+                if last.d_right.d_left == last:
+                    last.d_right.d_left = below[-1]
+                if last.d_right.u_left == last:
+                    last.d_right.u_left = below[-1]
+                below[-1].u_right = last.d_right
+                below[-1].d_right = last.d_right
 
         # connect above neighboring trapezoids
-        for i in range(1, len(above)):
-            t1, t2 = above[i-1], above[i]
-            # t1 and t2 must be sharing the same bottom segment
-            t1.d_right = t2
-            t2.d_left = t1
-            # handle pairing top neighbors
-            if t1.top == t2.top:
-                # if they share the same top segment, then they are top neighbors
-                t1.u_right = t2
-                t2.u_left = t1
-            else:
-                # otherwise, we need to inherit from crossed trapezoid neighbors
-                pass
-
-        # connect below neighboring trapezoids
         t1_crossed_origin_j = 0
         t2_crossed_origin_j = 0
         for i in range(1, len(above)):
@@ -407,14 +449,14 @@ class TrapezoidalMap:
 
     def _case_1_dag(
         self,
-        left_rem: Trapezoid,
-        right_rem: Trapezoid,
+        left_rem: Optional[Trapezoid],
+        right_rem: Optional[Trapezoid],
         above: Trapezoid,
         below: Trapezoid,
         seg: Segment
     ) -> Node:
         # case 1: both segments are in the same trapezoid
-        #            a(both)
+        #  Full case (both remainders exist):
         #               P
         #             /   \
         #            T    Q
@@ -422,36 +464,62 @@ class TrapezoidalMap:
         #              S    T
         #            /   \
         #           T    T
+        #
+        #  No left_rem:        No right_rem:       No remainders:
+        #       Q                   P                    S
+        #     /   \               /   \                /   \
+        #    S     T             T     S              T     T
+        #  /   \                     /   \
+        # T     T                   T     T
 
-        # build new leaves for trapezoids (there are 4)
-        left_rem_leaf = Leaf(left_rem)
-        right_rem_leaf = Leaf(right_rem)
+        # build leaves for above and below
         above_leaf = Leaf(above)
         below_leaf = Leaf(below)
-        # build XNode split for the left endpoint (root of the sub-DAG)
-        P = XNode(point=seg.left)
-        # left-rem trapezoid leaf
-        P.left = left_rem_leaf
-        left_rem_leaf.parent = P
-        # build XNode split for the right endpoint (right child of P)
-        Q = XNode(point=seg.right)
-        P.right = Q
-        # right-rem trapezoid leaf
-        Q.right = right_rem_leaf
-        right_rem_leaf.parent = Q
-        # build YNode split for the segment (left child of Q)
+        # build YNode split for the segment
         S = YNode(seg=seg)
-        Q.left = S
-        # connect above and below trapezoids
         S.above = above_leaf
         above_leaf.parent = S
         S.below = below_leaf
         below_leaf.parent = S
+
+        # Case: both remainders are None (segment spans entire trapezoid width)
+        if left_rem is None and right_rem is None:
+            return S
+
+        # Case: only right remainder exists
+        if left_rem is None:
+            right_rem_leaf = Leaf(right_rem)
+            Q = XNode(point=seg.right)
+            Q.left = S
+            Q.right = right_rem_leaf
+            right_rem_leaf.parent = Q
+            return Q
+
+        # Case: only left remainder exists
+        if right_rem is None:
+            left_rem_leaf = Leaf(left_rem)
+            P = XNode(point=seg.left)
+            P.left = left_rem_leaf
+            left_rem_leaf.parent = P
+            P.right = S
+            return P
+
+        # Case: both remainders exist (original case)
+        left_rem_leaf = Leaf(left_rem)
+        right_rem_leaf = Leaf(right_rem)
+        P = XNode(point=seg.left)
+        P.left = left_rem_leaf
+        left_rem_leaf.parent = P
+        Q = XNode(point=seg.right)
+        P.right = Q
+        Q.right = right_rem_leaf
+        right_rem_leaf.parent = Q
+        Q.left = S
         return P
 
     def _case_2_dag(
         self,
-        rem: Trapezoid,
+        rem: Optional[Trapezoid],
         above: Trapezoid,
         below: Trapezoid,
         seg: Segment,
@@ -464,19 +532,29 @@ class TrapezoidalMap:
         #        T    S                S     T
         #           /   \            /   \
         #          T    T           T    T
+        #
+        # When rem is None (endpoint coincides with trapezoid boundary):
+        #           S
+        #         /   \
+        #        T    T
 
         # build trapezoid leaves
-        rem_leaf = Leaf(rem)
         above_leaf = Leaf(above)
         below_leaf = Leaf(below)
-        # build root XNode
-        root = XNode(point=(seg.left if is_left else seg.right))
         # build S node
         S = YNode(seg=seg)
         S.above = above_leaf
         above_leaf.parent = S
         S.below = below_leaf
         below_leaf.parent = S
+
+        # If remainder doesn't exist, return just the YNode
+        if rem is None:
+            return S
+
+        # Otherwise, build the full XNode structure
+        rem_leaf = Leaf(rem)
+        root = XNode(point=(seg.left if is_left else seg.right))
         if is_left:
             root.left = rem_leaf
             rem_leaf.parent = root
