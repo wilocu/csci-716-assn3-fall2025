@@ -11,6 +11,10 @@ claude_*.json
 test_output.txt
 output_*.txt
 
+# Report and verification files
+report.txt
+VERIFICATION_CHECKLIST.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
