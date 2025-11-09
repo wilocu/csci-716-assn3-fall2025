@@ -82,29 +82,20 @@ class TrapezoidalMap:
         """Insert segment into map."""
         # 1. Find all trapezoids crossed by segment
         crossed = self._find_crossed(seg)
-        print("Crossed Trapezoids:")
-        for t in crossed:
-            print(f"    {t}")
-        print()
-
         # 2. Create new trapezoids
         left_rem_trap, right_rem_trap, above_traps, below_traps = self._create_trapezoids(crossed, seg)
-
         # 3. Connect neighbors
         self._connect_neighbors(crossed, left_rem_trap, right_rem_trap, above_traps, below_traps, seg)
-
         # 3. Build sub-DAG for new trapezoids
-        sub_dags = self._build_dag(crossed, left_rem_trap, right_rem_trap,
-                                  above_traps, below_traps, seg)
-
+        sub_dags = self._build_dag(crossed, left_rem_trap, right_rem_trap, above_traps, below_traps, seg)
         # 4. Replace crossed trapezoids in DAG
         self._replace_dag(crossed, sub_dags)
-
         # 5. Update trapezoid list
         self.trapezoids = [t for t in self.trapezoids if t not in crossed]
-        new_traps = above_traps + below_traps
+        new_traps = []
         if left_rem_trap:
-            new_traps.insert(0, left_rem_trap)
+            new_traps.append(left_rem_trap)
+        new_traps.extend(above_traps + below_traps)
         if right_rem_trap:
             new_traps.append(right_rem_trap)
         self.trapezoids.extend(new_traps)
@@ -685,15 +676,46 @@ class TrapezoidalMap:
 
         collect(self.root)
 
-        # Assign labels
-        labels = []
-        for node in all_nodes:
+        # Assign labels and create sorting key
+        def get_label(node: Node) -> str:
             if isinstance(node, XNode):
-                labels.append(node.point.label)
+                return node.point.label
             elif isinstance(node, YNode):
-                labels.append(node.seg.label)
+                return node.seg.label
             elif isinstance(node, Leaf):
-                labels.append(node.trap.label if node.trap.label else "T?")
+                return node.trap.label if node.trap.label else "T?"
+            return "?"
+
+        def sort_key(node: Node) -> Tuple[int, int]:
+            """Return (type_priority, number) for sorting.
+            P nodes: (0, n), Q nodes: (1, n), S nodes: (2, n), T nodes: (3, n)
+            """
+            label = get_label(node)
+            if not label or label == "?":
+                return (999, 0)
+
+            prefix = label[0]
+            try:
+                number = int(label[1:])
+            except (ValueError, IndexError):
+                number = 0
+
+            if prefix == 'P':
+                return (0, number)
+            elif prefix == 'Q':
+                return (1, number)
+            elif prefix == 'S':
+                return (2, number)
+            elif prefix == 'T':
+                return (3, number)
+            else:
+                return (999, number)
+
+        # Sort nodes by type (P, Q, S, T) and then by number
+        all_nodes.sort(key=sort_key)
+
+        # Assign labels
+        labels = [get_label(node) for node in all_nodes]
 
         # Build adjacency matrix
         n = len(all_nodes)
@@ -716,33 +738,57 @@ class TrapezoidalMap:
 
 
 def write_adjacency_matrix(output_path: str, labels: List[str], matrix: List[List[int]]):
-    """Write adjacency matrix to file."""
+    """Write adjacency matrix to file in transposed form, merging duplicate labels."""
     import os
     n = len(labels)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    # Find unique labels and create mapping from original indices to merged indices
+    unique_labels = []
+    label_to_indices = {}  # Maps label to list of original indices
+
+    for i, label in enumerate(labels):
+        if label not in label_to_indices:
+            unique_labels.append(label)
+            label_to_indices[label] = []
+        label_to_indices[label].append(i)
+
+    # Create merged matrix
+    m = len(unique_labels)
+    merged_matrix = [[0] * m for _ in range(m)]
+
+    for i, label_i in enumerate(unique_labels):
+        for j, label_j in enumerate(unique_labels):
+            # Merge cells: if any original cell has 1, merged cell has 1
+            for orig_i in label_to_indices[label_i]:
+                for orig_j in label_to_indices[label_j]:
+                    if matrix[orig_i][orig_j] == 1:
+                        merged_matrix[i][j] = 1
+                        break
+                if merged_matrix[i][j] == 1:
+                    break
+
     with open(output_path, 'w') as f:
         # Header row
         f.write(f"{'':>6}")
-        for label in labels:
+        for label in unique_labels:
             f.write(f"{label:>4}")
         f.write("  Sum\n")
 
-        # Matrix rows
-        for i, label in enumerate(labels):
+        # Matrix rows (transposed: write merged_matrix[j][i] instead of merged_matrix[i][j])
+        for i, label in enumerate(unique_labels):
             f.write(f"{label:>6}")
-            for j in range(n):
-                f.write(f"{matrix[i][j]:>4}")
-            row_sum = sum(matrix[i])
+            for j in range(m):
+                f.write(f"{merged_matrix[j][i]:>4}")
+            row_sum = sum(merged_matrix[j][i] for j in range(m))
             f.write(f"{row_sum:>4}\n")
 
         # Column sums
         f.write(f"{'Sum':>6}")
-        for j in range(n):
-            col_sum = sum(matrix[i][j] for i in range(n))
+        for j in range(m):
+            col_sum = sum(merged_matrix[j][i] for i in range(m))
             f.write(f"{col_sum:>4}")
-        total = sum(sum(row) for row in matrix)
-        f.write(f"{total:>4}\n")
+        f.write("\n")
 
 
 def main():
@@ -780,7 +826,6 @@ def main():
         labels, matrix = trap_map.generate_adjacency_matrix()
         write_adjacency_matrix(args.output, labels, matrix)
         print(f"Adjacency matrix written to {args.output}")
-        print(f"DAG contains {len(labels)} nodes")
 
         # Visualization
         if args.visualize:
