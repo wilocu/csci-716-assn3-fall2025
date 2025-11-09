@@ -2,7 +2,7 @@
 Trapezoidal map construction using randomized incremental algorithm.
 """
 import argparse
-import sys
+import sys, os
 import numpy as np
 from typing import List, Tuple, Optional
 import utils
@@ -739,7 +739,6 @@ class TrapezoidalMap:
 
 def write_adjacency_matrix(output_path: str, labels: List[str], matrix: List[List[int]]):
     """Write adjacency matrix to file in transposed form, merging duplicate labels."""
-    import os
     n = len(labels)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -829,8 +828,7 @@ def main():
 
         # Visualization
         if args.visualize:
-            from visualize import visualize_trapezoidal_map
-            visualize_trapezoidal_map(trap_map, f"Trapezoidal Map - {args.input_file}")
+            visualize.visualize_trapezoidal_map(trap_map, f"Trapezoidal Map - {args.input_file}")
 
         # Interactive query mode
         print()
